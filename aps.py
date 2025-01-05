@@ -50,7 +50,8 @@ def load_normal_data(data_path):
     scaled_data = scaler.fit_transform(data.values)
     return scaled_data
 
-data_directory = r'C:\Users\Asus\Documents\PSU-Course\sbsplusplus-master\normal-data'
+data_directory = r'C:\Users\Asus\Documents\GitHub\Adaptive-Reward-Scaling-Reinforcement-Learning\normal-data'
+
 x_train = load_normal_data(data_directory)
 
 class Sampling(tf.keras.layers.Layer):
