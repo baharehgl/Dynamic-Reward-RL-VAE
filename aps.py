@@ -192,7 +192,8 @@ class ActiveLearning:
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = int(label)
 
 ########################### Training Loop #####################
-env = EnvTimeSeries(data_path=r'C:\Users\Asus\Documents\GitHub\Adaptive-Reward-Scaling-Reinforcement-Learning\time-series.csv')
+#env = EnvTimeSeries(data_path=r'C:\Users\Asus\Documents\GitHub\Adaptive-Reward-Scaling-Reinforcement-Learning\time-series.csv')
+env = EnvTimeSeries(data_path='C:/Users/Asus/Documents/PSU-Course/ydata-labeled-time-series-anomalies-v1_0/A1Benchmark')
 
 sess = tf.compat.v1.Session()
 agent = QLearningAgent()
