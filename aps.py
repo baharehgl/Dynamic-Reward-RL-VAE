@@ -41,6 +41,56 @@ rho = 0.01
 tau_min = 0.1
 tau_max = 5.0
 
+########################### Environment for Time-Series RL #####################
+class EnvTimeSeries:
+    def __init__(self, data_path, n_steps=25):
+        """
+        Initializes the RL environment for time-series anomaly detection.
+        """
+        self.data_path = data_path
+        self.n_steps = n_steps
+        self.timeseries = self.load_data()
+        self.cursor = n_steps  # Start cursor after collecting enough data points
+        self.done = False  # Flag to check if episode is done
+
+    def load_data(self):
+        """
+        Loads and preprocesses time-series data.
+        """
+        data = pd.read_csv(self.data_path)
+        scaler = StandardScaler()
+        data['value'] = scaler.fit_transform(data[['value']])
+        return data
+
+    def reset(self):
+        """
+        Resets the environment and returns the initial state.
+        """
+        self.cursor = self.n_steps
+        self.done = False
+        return self.get_state()
+
+    def get_state(self):
+        """
+        Returns the current state (sliding window of time-series data).
+        """
+        state = self.timeseries.iloc[self.cursor - self.n_steps:self.cursor][['value']].values
+        return np.expand_dims(state, axis=0)  # Reshape for LSTM input
+
+    def step(self, action):
+        """
+        Takes an action and returns next state, reward, and done flag.
+        """
+        reward, tau = RNNBinaryRewardFuc(self.timeseries, self.cursor, action, vae)
+
+        self.cursor += 1  # Move to the next time step
+        if self.cursor >= len(self.timeseries) - 1:
+            self.done = True
+
+        next_state = self.get_state()
+        return next_state, reward, self.done, tau
+
+
 ########################### VAE #####################
 def load_normal_data(data_path):
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
