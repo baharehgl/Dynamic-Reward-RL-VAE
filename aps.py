@@ -192,6 +192,8 @@ class ActiveLearning:
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = int(label)
 
 ########################### Training Loop #####################
+env = EnvTimeSeries(data_path=r'C:\Users\Asus\Documents\GitHub\Adaptive-Reward-Scaling-Reinforcement-Learning\time-series.csv')
+
 sess = tf.compat.v1.Session()
 agent = QLearningAgent()
 sess.run(tf.compat.v1.global_variables_initializer())
@@ -202,18 +204,29 @@ epsilon = EPSILON
 num_active_learning_samples = 5
 
 for step in range(EPISODES):
-    state = env.reset()
-    action_probs = agent.predict(sess, [state])[0]
-    action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-    reward, tau = RNNBinaryRewardFuc(env.timeseries, env.timeseries_curser, action, vae)
-    tau_values.append(tau)
-    step_values.append(step)
+    state = env.reset()  # ✅ FIXED: Properly initializing the environment
+    done = False
 
-    # Perform Active Learning every 50 steps
-    if step % 50 == 0:
-        al = ActiveLearning(env, num_active_learning_samples, estimator=agent)
-        selected_samples = al.select_samples()
-        al.label_samples(selected_samples)
+    while not done:  # Run episode until termination
+        action_probs = agent.predict(sess, [state])[0]
+        action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+
+        next_state, reward, done, tau = env.step(action)  # ✅ FIXED: Now using environment
+
+        tau_values.append(tau)
+        step_values.append(step)
+
+        # Perform Active Learning every 50 steps
+        if step % 50 == 0:
+            al = ActiveLearning(env, num_active_learning_samples, estimator=agent)
+            selected_samples = al.select_samples()
+            al.label_samples(selected_samples)
+
+        # Update RL model
+        target_q_values = reward + DISCOUNT_FACTOR * np.max(agent.predict(sess, [next_state])[0])
+        agent.update(sess, [state], [target_q_values])
+
+        state = next_state  # Move to next state
 
     # Update epsilon for exploration
     epsilon = max(MIN_EPSILON, epsilon * EPSILON_DECAY)
