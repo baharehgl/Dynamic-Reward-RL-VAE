@@ -225,15 +225,35 @@ def optimize_tau(r1, r2, rho=0.01, tau_min=0.1, tau_max=5.0):
     result = minimize(loss, x0=1.0, bounds=[(tau_min, tau_max)], method='L-BFGS-B')
     return result.x[0]
 
-def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, rho=0.01, tau_min=0.1, tau_max=5.0):
+def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None):
+    """
+    Computes the reward for reinforcement learning using APS.
+    Ensures correct input shape for VAE.
+    """
     if timeseries_curser >= n_steps:
-        current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
+        # Extract current time-series window
+        current_state = timeseries.iloc[timeseries_curser - n_steps:timeseries_curser]
+
+        # Ensure VAE gets exactly 3 features
+        if 'feature_1' in current_state.columns and 'feature_2' in current_state.columns:
+            current_state = current_state[['value', 'feature_1', 'feature_2']].values  # Use 3 features
+        else:
+            current_state = current_state[['value']].values  # If missing, add two dummy columns
+            current_state = np.hstack((current_state, np.zeros((n_steps, 2))))  # (25,3)
+
+        # Reshape input for VAE
+        current_state = current_state.reshape((1, 3))  # ✅ Ensures correct shape (1, 3)
+
+        # Predict using VAE
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
+
+        # Compute reward
         r1 = TP_Value if timeseries['label'][timeseries_curser] == 1 else TN_Value
         r2 = -reconstruction_error
-        tau = optimize_tau(r1, r2, rho, tau_min, tau_max)
+        tau = optimize_tau(r1, r2)
         adaptive_reward = tau * r1 + (1 - tau) * r2
+
         return [adaptive_reward, adaptive_reward], tau
     else:
         return [0, 0], 0
