@@ -176,7 +176,10 @@ class QLearningAgent:
         self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate).minimize(self.loss)
 
     def predict(self, sess, state):
-        return sess.run(self.q_values, feed_dict={self.state: state})
+        q_values = sess.run(self.q_values, feed_dict={self.state: state})
+        q_values = np.nan_to_num(q_values)  # Convert NaNs to zeros
+        q_values -= np.min(q_values)  # Ensure non-negative values
+        return q_values / np.sum(q_values)  # Normalize
 
     def update(self, sess, state, target):
         sess.run(self.optimizer, feed_dict={self.state: state, self.target: target})
@@ -224,6 +227,15 @@ for step in range(EPISODES):
 
     while not done:  # Run episode until termination
         action_probs = agent.predict(sess, [state])[0]
+        print("Action probabilities:", action_probs)  # Debugging line
+
+        # Ensure action_probs is valid
+        if np.any(action_probs < 0) or np.any(np.isnan(action_probs)):
+            print("⚠️ Warning: Invalid action probabilities detected!")
+            action_probs = np.abs(action_probs)  # Convert negatives to positive
+            action_probs /= np.sum(action_probs)  # Normalize to sum to 1
+
+        # Select action using fixed probabilities
         action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
 
         next_state, reward, done, tau = env.step(action)  # ✅ FIXED: Now using environment
