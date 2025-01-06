@@ -152,18 +152,18 @@ class EnvTimeSeries:
     def get_state(self):
         """
         Returns the current state (sliding window of time-series data).
-        Ensures the correct shape for LSTM input.
+        Ensures correct shape for LSTM input.
         """
         state = self.timeseries.iloc[self.cursor - self.n_steps:self.cursor]
 
-        # Ensure at least 2 features (use dummy second feature if missing)
+        # Ensure two features are provided
         if 'another_feature' in state.columns:
-            state = state[['value', 'another_feature']].values  # Selecting exactly 2 features
+            state = state[['value', 'another_feature']].values  # If dataset has two features
         else:
-            state = state[['value']].values  # If only 'value' exists
-            state = np.hstack((state, np.zeros_like(state)))  # ✅ Add dummy second feature
+            state = state[['value']].values
+            state = np.hstack((state, np.zeros_like(state)))  # Add a dummy second feature
 
-        return state.reshape(1, n_steps, 2)  # ✅ Ensure correct shape (1, 25, 2)
+        return state.reshape(1, n_steps, 2)  # ✅ Ensures shape (1, 25, 2)
     def step(self, action):
         """
         Takes an action and returns next state, reward, and done flag.
