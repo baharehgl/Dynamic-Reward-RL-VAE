@@ -55,11 +55,27 @@ class EnvTimeSeries:
 
     def load_data(self):
         """
-        Loads and preprocesses time-series data.
+        Loads and preprocesses multiple CSV files from the specified directory.
         """
-        data = pd.read_csv(self.data_path)
+        if not os.path.isdir(self.data_path):
+            raise NotADirectoryError(f"Provided path is not a directory: {self.data_path}")
+
+        all_files = [os.path.join(self.data_path, f) for f in os.listdir(self.data_path) if f.endswith('.csv')]
+
+        if not all_files:
+            raise FileNotFoundError(f"No CSV files found in directory: {self.data_path}")
+
+        # Read and combine all CSV files
+        data_list = [pd.read_csv(file) for file in all_files]
+        data = pd.concat(data_list, ignore_index=True)
+
+        # Normalize 'value' column if it exists
         scaler = StandardScaler()
-        data['value'] = scaler.fit_transform(data[['value']])
+        if 'value' in data.columns:
+            data['value'] = scaler.fit_transform(data[['value']])
+        else:
+            raise KeyError("Column 'value' not found in dataset!")
+
         return data
 
     def reset(self):
