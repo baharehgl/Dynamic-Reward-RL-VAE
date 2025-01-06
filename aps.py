@@ -42,6 +42,7 @@ tau_min = 0.1
 tau_max = 5.0
 
 ########################### Environment for Time-Series RL #####################
+'''
 class EnvTimeSeries:
     def __init__(self, data_path, n_steps=25):
         """
@@ -102,6 +103,71 @@ class EnvTimeSeries:
 
         return state.reshape(1, n_steps, 2)  # ✅ Ensures shape (1, 25, 2)
 
+'''
+
+class EnvTimeSeries:
+    def __init__(self, data_path, n_steps=25):
+        """
+        Initializes the RL environment for time-series anomaly detection.
+        """
+        self.data_path = data_path
+        self.n_steps = n_steps
+        self.timeseries = self.load_data()
+        self.cursor = n_steps  # Start cursor after collecting enough data points
+        self.done = False  # Flag to check if episode is done
+
+    def load_data(self):
+        """
+        Loads and preprocesses multiple CSV files from the specified directory.
+        """
+        if not os.path.isdir(self.data_path):
+            raise NotADirectoryError(f"Provided path is not a directory: {self.data_path}")
+
+        all_files = [os.path.join(self.data_path, f) for f in os.listdir(self.data_path) if f.endswith('.csv')]
+
+        if not all_files:
+            raise FileNotFoundError(f"No CSV files found in directory: {self.data_path}")
+
+        # Read and combine all CSV files
+        data_list = [pd.read_csv(file) for file in all_files]
+        data = pd.concat(data_list, ignore_index=True)
+
+        # Normalize 'value' column
+        scaler = StandardScaler()
+        if 'value' in data.columns:
+            data['value'] = scaler.fit_transform(data[['value']])
+        else:
+            raise KeyError("Column 'value' not found in dataset!")
+
+        return data
+
+    def reset(self):
+        """
+        Resets the environment and returns the initial state.
+        """
+        self.cursor = self.n_steps
+        self.done = False
+        return self.get_state()
+
+    def get_state(self):
+        """
+        Returns the current state (sliding window of time-series data).
+        """
+        state = self.timeseries.iloc[self.cursor - self.n_steps:self.cursor][['value']].values
+        return np.expand_dims(state, axis=0)  # Ensures correct shape (1, 25, 1)
+
+    def step(self, action):
+        """
+        Takes an action and returns next state, reward, and done flag.
+        """
+        reward, tau = RNNBinaryRewardFuc(self.timeseries, self.cursor, action, vae)
+
+        self.cursor += 1  # Move to the next time step
+        if self.cursor >= len(self.timeseries) - 1:
+            self.done = True
+
+        next_state = self.get_state()
+        return next_state, reward, self.done, tau  # ✅ Ensures `step()` returns the correct values
 
 ########################### VAE #####################
 def load_normal_data(data_path):
