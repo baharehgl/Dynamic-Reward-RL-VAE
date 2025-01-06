@@ -89,22 +89,18 @@ class EnvTimeSeries:
     def get_state(self):
         """
         Returns the current state (sliding window of time-series data).
+        Ensures the correct shape for LSTM input.
         """
-        state = self.timeseries.iloc[self.cursor - self.n_steps:self.cursor][['value']].values
-        return np.expand_dims(state, axis=0)  # Reshape for LSTM input
+        state = self.timeseries.iloc[self.cursor - self.n_steps:self.cursor]
 
-    def step(self, action):
-        """
-        Takes an action and returns next state, reward, and done flag.
-        """
-        reward, tau = RNNBinaryRewardFuc(self.timeseries, self.cursor, action, vae)
+        # Ensure the correct number of features (e.g., ['value', 'another_feature'])
+        if 'another_feature' in state.columns:
+            state = state[['value', 'another_feature']].values  # Selecting exactly 2 features
+        else:
+            state = state[['value']].values  # If only 'value' exists, add a dummy feature
+            state = np.hstack((state, np.zeros_like(state)))  # Adding a zero column to match (25,2)
 
-        self.cursor += 1  # Move to the next time step
-        if self.cursor >= len(self.timeseries) - 1:
-            self.done = True
-
-        next_state = self.get_state()
-        return next_state, reward, self.done, tau
+        return np.expand_dims(state, axis=0)  # Ensures correct shape (1, 25, 2)
 
 
 ########################### VAE #####################
