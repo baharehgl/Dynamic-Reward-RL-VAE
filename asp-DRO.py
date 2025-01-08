@@ -1102,8 +1102,8 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
 
 # Run training with learned tau
 train(100, 30, 0.92, learn_tau=True)
-train(150, 50, 0.94, learn_tau=True)
-train(200, 100, 0.96, learn_tau=True)
+#train(150, 50, 0.94, learn_tau=True)
+#train(200, 100, 0.96, learn_tau=True)
 
 
 #train(100, 30, 1.0)
