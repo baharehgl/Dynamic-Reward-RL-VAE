@@ -1011,91 +1011,99 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model
 
 
-def train(num_LP, num_AL, discount_factor):
+def train(num_LP, num_AL, discount_factor, learn_tau=True):
+    """
+    Train the RL agent with learned tau using DRO.
 
-    original_dim = 3  # Adjust this based on the number of features in your data
+    Args:
+    - num_LP: Number of Label Propagation samples.
+    - num_AL: Number of Active Learning samples.
+    - discount_factor: Discount factor for RL.
+    - learn_tau: Whether to learn tau dynamically using DRO.
+
+    Returns:
+    - Optimization metric (e.g., F1-score).
+    """
+    original_dim = 3  # Number of features in data
     latent_dim = 10
     intermediate_dim = 64
 
-    # Load your actual dataset
+    # Load the dataset
     data_directory = r'C:\Users\Asus\Documents\PSU-Course\sbsplusplus-master\normal-data'
-    #data_directory = r'C:\Users\robotics\PycharmProjects\Anomaly project\sbsplusplus-master\normal-data'
     x_train = load_normal_data(data_directory)
 
-    # VAE setup and training
+    # Train a Variational Autoencoder (VAE)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=50, batch_size=32)
     vae.save('vae_model.h5')
 
-    # Load the pretrained VAE
+    # Load pretrained VAE
     vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
 
-    percentage = [1]
-    test = 0
-    for j in range(len(percentage)):
-        exp_relative_dir = ['A1 LP 1500init_warmup h128 b256 300ep num_LP' + str(num_LP) + ' num_AL' + str(num_AL) +
-                            ' d' + str(discount_factor)]
-        dataset_dir = ['C:/Users/Asus/Documents/PSU-Course/ydata-labeled-time-series-anomalies-v1_0/A1Benchmark']
-        #dataset_dir = [r'C:\Users\robotics\PycharmProjects\Anomaly project\ydata-labeled-time-series-anomalies-v1_0\A1Benchmark']
+    exp_relative_dir = ['RLVAL with DRO and Adaptive Scaling']
+    dataset_dir = ['C:/Users/Asus/Documents/PSU-Course/ydata-labeled-time-series-anomalies-v1_0/A1Benchmark']
 
-        for i in range(len(dataset_dir)):
-            env = EnvTimeSeriesfromRepo(dataset_dir[i])
-            env.statefnc = RNNBinaryStateFuc
-            #env.rewardfnc = RNNBinaryRewardFuc  # Adjust this function to utilize VAE
-            env.rewardfnc = lambda timeseries, timeseries_curser, action: RNNBinaryRewardFuc(timeseries,
-                                                                                             timeseries_curser, action,
-                                                                                             vae,
-                                                                                             scale_factor=10)
+    for i in range(len(dataset_dir)):
+        env = EnvTimeSeriesfromRepo(dataset_dir[i])
+        env.statefnc = RNNBinaryStateFuc
 
-            env.timeseries_curser_init = n_steps
-            env.datasetfix = DATAFIXED
-            env.datasetidx = 0
+        if learn_tau:
+            env.rewardfnc = lambda timeseries, timeseries_curser, action: RNNBinaryRewardFuc(
+                timeseries, timeseries_curser, action, vae
+            )
+        else:
+            env.rewardfnc = RNNBinaryRewardFuc  # Without adaptive tau
 
-            # Testing environment setup
-            env_test = env
-            env_test.rewardfnc = RNNBinaryRewardFucTest
+        env.timeseries_curser_init = n_steps
+        env.datasetfix = DATAFIXED
+        env.datasetidx = 0
 
-            if test == 1:
-                env.datasetrng = env.datasetsize
-            else:
-                env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
+        # Testing environment
+        env_test = env
+        env_test.rewardfnc = RNNBinaryRewardFucTest
 
-            experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[i]))
+        experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[i]))
 
-            tf.compat.v1.reset_default_graph()
-            global_step = tf.Variable(0, name="global_step", trainable=False)
+        tf.compat.v1.reset_default_graph()
+        global_step = tf.Variable(0, name="global_step", trainable=False)
 
-            qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
-            target_estimator = Q_Estimator_Nonlinear(scope="target")
+        qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
+        target_estimator = Q_Estimator_Nonlinear(scope="target")
 
-            sess = tf.compat.v1.Session()
-            sess.run(tf.compat.v1.global_variables_initializer())
+        sess = tf.compat.v1.Session()
+        sess.run(tf.compat.v1.global_variables_initializer())
 
-            with sess.as_default():
-                q_learning(env,
-                           sess=sess,
-                           qlearn_estimator=qlearn_estimator,
-                           target_estimator=target_estimator,
-                           num_episodes=300,
-                           num_epoches=10,
-                           experiment_dir=experiment_dir,
-                           replay_memory_size=500000,
-                           replay_memory_init_size=1500,
-                           update_target_estimator_every=10,
-                           epsilon_start=1,
-                           epsilon_end=0.1,
-                           epsilon_decay_steps=500000,
-                           discount_factor=discount_factor,
-                           batch_size=256,
-                           num_LabelPropagation=num_LP,
-                           num_active_learning=num_AL,
-                           test=test,
-                           vae_model=vae  # Pass the VAE model as an additional argument
-                           )
-                optimization_metric = q_learning_validator(env_test, qlearn_estimator,
-                                                           int(env.datasetsize * (1 - validation_separate_ratio)),
-                                                           experiment_dir)
-            return optimization_metric
+        with sess.as_default():
+            q_learning(env,
+                       sess=sess,
+                       qlearn_estimator=qlearn_estimator,
+                       target_estimator=target_estimator,
+                       num_episodes=300,
+                       num_epoches=10,
+                       experiment_dir=experiment_dir,
+                       replay_memory_size=500000,
+                       replay_memory_init_size=1500,
+                       update_target_estimator_every=10,
+                       epsilon_start=1,
+                       epsilon_end=0.1,
+                       epsilon_decay_steps=500000,
+                       discount_factor=discount_factor,
+                       batch_size=256,
+                       num_LabelPropagation=num_LP,
+                       num_active_learning=num_AL,
+                       test=0,
+                       vae_model=vae
+                       )
+            optimization_metric = q_learning_validator(env_test, qlearn_estimator,
+                                                       int(env.datasetsize * (1 - validation_separate_ratio)),
+                                                       experiment_dir)
+        return optimization_metric
+
+
+# Run training with learned tau
+train(100, 30, 0.92, learn_tau=True)
+train(150, 50, 0.94, learn_tau=True)
+train(200, 100, 0.96, learn_tau=True)
 
 
 #train(100, 30, 1.0)
@@ -1110,6 +1118,6 @@ def train(num_LP, num_AL, discount_factor):
 #train(150, 50, 0.92)
 #train(200, 100, 0.88)
 
-train(100, 30, 0.92)  # Adjusting the discount factor
-train(150, 50, 0.94)  # Adjusting the discount factor
-train(200, 100, 0.96)  # Adjusting the discount factor
+#train(100, 30, 0.92)  # Adjusting the discount factor
+#train(150, 50, 0.94)  # Adjusting the discount factor
+#train(200, 100, 0.96)  # Adjusting the discount factor
