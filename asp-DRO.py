@@ -11,6 +11,8 @@ import time
 from scipy import stats
 import tensorflow as tf
 
+
+
 tf.compat.v1.disable_eager_execution()
 
 # from tensorflow.contrib import rnn
@@ -200,7 +202,7 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
-'''
+
 
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
@@ -218,6 +220,74 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
             return [FN_Value + vae_penalty, TP_Value + vae_penalty]
     else:
         return [0, 0]
+'''
+
+
+def kl_divergence(p, q):
+    """Compute the KL divergence KL(p || q)."""
+    p = np.clip(p, 1e-10, 1)  # Avoid log(0)
+    q = np.clip(q, 1e-10, 1)
+    return np.sum(p * np.log(p / q))
+
+
+def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, rho=0.5, max_iter=10):
+    """
+    Learn tau dynamically using DRO (KL-constrained optimization).
+
+    Args:
+    - preference_strength: Probability of preference (sigmoid of reconstruction error).
+    - tau_min, tau_max: Bounds for tau.
+    - rho: Regularization term for DRO.
+    - max_iter: Iterations for optimizing tau.
+
+    Returns:
+    - Optimized tau.
+    """
+    tau = 1.0  # Initialize tau
+
+    for _ in range(max_iter):
+        # Compute KL divergence constraint
+        kl_term = kl_divergence([preference_strength, 1 - preference_strength], [0.5, 0.5])
+
+        # Gradient of the DRO loss w.r.t. tau
+        grad = -np.log(1 + np.exp(-preference_strength / tau)) + rho - kl_term
+
+        # Hessian (second derivative)
+        hess = preference_strength ** 2 * np.exp(-preference_strength / tau) / (
+                    tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2)
+
+        # Newton's update step for tau
+        tau = tau - grad / (hess + 1e-8)
+
+        # Project tau to be within valid bounds
+        tau = np.clip(tau, tau_min, tau_max)
+
+    return tau
+
+
+def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
+    if timeseries_curser >= n_steps:
+        current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
+        vae_reconstruction = vae.predict(current_state)
+        reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
+
+        vae_penalty = -scale_factor * reconstruction_error
+
+        # Compute preference strength (using sigmoid transformation of reconstruction error)
+        preference_strength = np.clip(1 / (1 + np.exp(-reconstruction_error)), 0.05, 0.95)
+
+        # Compute adaptive tau using DRO
+        tau = adaptive_scaling_factor_dro(preference_strength)
+
+        if timeseries['label'][timeseries_curser] == 0:
+            return [tau * (TN_Value + vae_penalty), tau * (FP_Value + vae_penalty)]
+        if timeseries['label'][timeseries_curser] == 1:
+            return [tau * (FN_Value + vae_penalty), tau * (TP_Value + vae_penalty)]
+    else:
+        return [0, 0]
+
+
+
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
