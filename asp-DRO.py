@@ -10,7 +10,7 @@ import os
 import time
 from scipy import stats
 import tensorflow as tf
-
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, matthews_corrcoef
 
 
 
@@ -811,6 +811,89 @@ def q_learning(env,
     return
 
 
+def evaluate_model(y_true, y_pred):
+    """
+    Compute various classification metrics.
+
+    Args:
+    - y_true: Ground truth labels (0 = Normal, 1 = Anomaly)
+    - y_pred: Predicted labels (0 = Normal, 1 = Anomaly)
+
+    Returns:
+    - Dictionary with evaluation metrics.
+    """
+    # Compute confusion matrix
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+
+    # Compute existing metrics
+    precision = precision_score(y_true, y_pred, zero_division=1)
+    recall = recall_score(y_true, y_pred, zero_division=1)
+    f1 = f1_score(y_true, y_pred, zero_division=1)
+
+    # Compute new metrics
+    mcc = matthews_corrcoef(y_true, y_pred)  # Matthews Correlation Coefficient
+    balanced_acc = (recall + (tn / (tn + fp))) / 2  # Balanced Accuracy
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0  # False Negative Rate
+
+    return {
+        "Precision": precision,
+        "Recall": recall,
+        "F1-Score": f1,
+        "MCC": mcc,
+        "Balanced Accuracy": balanced_acc,
+        "FPR": fpr,
+        "FNR": fnr
+    }
+
+
+def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
+    """
+    Validate the trained model using multiple evaluation metrics.
+
+    Args:
+        env: Environment.
+        estimator: Trained model.
+        num_episodes: Number of validation episodes.
+
+    Returns:
+        Dictionary with averaged evaluation metrics.
+    """
+    y_true_all = []
+    y_pred_all = []
+
+    for i_episode in range(num_episodes):
+        state_rec = []
+        action_rec = []
+
+        policy = make_epsilon_greedy_policy(estimator, env.action_space_n)
+        state = env.reset()
+        while env.datasetidx < env.datasetrng * validation_separate_ratio:
+            state = env.reset()
+
+        for t in itertools.count():
+            action_probs = policy(state, 0)  # Use greedy policy
+            action = np.argmax(action_probs)
+
+            y_true_all.append(env.timeseries['anomaly'][env.timeseries_curser])  # True label
+            y_pred_all.append(action)  # Predicted label
+
+            next_state, reward, done, _ = env.step(action)
+            if done:
+                break
+            state = next_state[action]
+
+    # Compute evaluation metrics
+    results = evaluate_model(y_true_all, y_pred_all)
+
+    # Print metrics
+    for metric, value in results.items():
+        print(f"{metric}: {value:.4f}")
+
+    return results
+
+
+'''
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     """
     With 1) the trained estimator of Q(s,a) action-value function, i.e., estimator
@@ -926,7 +1009,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
         rec_file.close()
 
     return f1_overall / num_episodes
-
+'''
 
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
