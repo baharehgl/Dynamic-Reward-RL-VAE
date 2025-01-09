@@ -13,6 +13,7 @@ import tensorflow as tf
 
 
 
+
 tf.compat.v1.disable_eager_execution()
 
 # from tensorflow.contrib import rnn
@@ -265,6 +266,8 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
     return tau
 
 
+tau_values = []
+
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
@@ -273,11 +276,10 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
 
         vae_penalty = -scale_factor * reconstruction_error
 
-        # Compute preference strength (using sigmoid transformation of reconstruction error)
         preference_strength = np.clip(1 / (1 + np.exp(-reconstruction_error)), 0.05, 0.95)
 
-        # Compute adaptive tau using DRO
         tau = adaptive_scaling_factor_dro(preference_strength)
+        tau_values.append(tau)  # Store tau for visualization
 
         if timeseries['label'][timeseries_curser] == 0:
             return [tau * (TN_Value + vae_penalty), tau * (FP_Value + vae_penalty)]
@@ -1100,10 +1102,23 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
         return optimization_metric
 
 
+def plot_tau_evolution():
+    plt.figure(figsize=(10, 5))
+    plt.plot(tau_values, label="Tau over time", alpha=0.8)
+    plt.xlabel("Training Steps")
+    plt.ylabel("Tau Value")
+    plt.title("Evolution of Tau during Training")
+    plt.legend()
+    plt.show()
+
+plot_tau_evolution()
+
+
+
 # Run training with learned tau
 train(100, 30, 0.92, learn_tau=True)
-#train(150, 50, 0.94, learn_tau=True)
-#train(200, 100, 0.96, learn_tau=True)
+train(150, 50, 0.94, learn_tau=True)
+train(200, 100, 0.96, learn_tau=True)
 
 
 #train(100, 30, 1.0)
