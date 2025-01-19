@@ -20,7 +20,7 @@ from tensorflow.keras.models import load_model
 from mpl_toolkits.mplot3d import axes3d
 from collections import deque, namedtuple
 import glob
-
+import tables
 # --------------------------- Custom Environment Import ---------------------------
 
 # Import the custom environment
