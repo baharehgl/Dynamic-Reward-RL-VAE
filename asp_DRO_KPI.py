@@ -182,37 +182,32 @@ def load_test_data_kpi(data_path):
     import h5py
 
     with h5py.File(data_path, 'r') as hdf:
-        # List all groups and datasets
-        print("\nHDF5 file structure:")
+        # Print the structure of the HDF5 file
+        print("\nDetailed HDF5 file structure:")
 
-        def printname(name):
-            print(name)
+        def print_attrs(name, obj):
+            print(f"{name}: {type(obj)}")
+            for key, val in obj.attrs.items():
+                print(f"    Attribute - {key}: {val}")
 
-        hdf.visit(printname)
+        hdf.visititems(print_attrs)
 
-        # Based on the printed structure, identify the correct dataset paths
-        # For example, if the datasets are under 'test_data' and 'test_labels'
-        # Replace 'test_data' and 'test_labels' with actual group/dataset names
-        # Here, we'll assume they are directly under the root
+        # Identify datasets containing data and labels
+        # Replace the paths below with the actual dataset paths identified from the structure
         try:
-            # Attempt to access 'data' and 'labels' directly
-            data = hdf['data'][:]  # Replace 'data' with actual dataset name
-            labels = hdf['labels'][:]  # Replace 'labels' with actual dataset name
-        except KeyError:
-            # If 'data' and 'labels' are groups, access their datasets
-            # Modify these as per your HDF5 structure
-            try:
-                data = hdf['test_data/dataset1'][:]  # Example path
-                labels = hdf['test_labels/dataset1'][:]  # Example path
-            except KeyError:
-                raise KeyError(
-                    "HDF5 file does not contain expected 'data' and 'labels' datasets. Please verify the dataset paths.")
+            # Example assumption based on structure
+            data = hdf['data/block0_values'][:]  # Replace with actual data dataset path
+            labels = hdf['data/block1_values'][:]  # Replace with actual labels dataset path
+        except KeyError as e:
+            print(f"KeyError: {e}")
+            print("Please verify the dataset paths in the HDF5 file.")
+            sys.exit(1)
 
     # Convert to DataFrame for compatibility with existing code
     # Adjust column names based on actual data
-    # Here, we'll assume 'data' has three metrics; modify as needed
     try:
-        df = pd.DataFrame(data, columns=['metric1', 'metric2', 'metric3'])  # Adjust based on actual data
+        # Assuming 'data' has three metrics; adjust as needed
+        df = pd.DataFrame(data, columns=['metric1', 'metric2', 'metric3'])  # Modify as per your data
     except ValueError:
         # If data has different dimensions, adjust accordingly
         print("Error: The shape of 'data' does not match the expected number of columns.")
