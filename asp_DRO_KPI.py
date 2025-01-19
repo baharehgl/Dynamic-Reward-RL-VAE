@@ -111,12 +111,13 @@ def find_file(directory, pattern):
         raise FileNotFoundError(f"No file matching pattern '{pattern}' found in directory '{directory}'")
     return files[0]
 
-def load_normal_data_kpi(data_path):
+def load_normal_data_kpi(data_path, exclude_columns=None):
     """
     Load and preprocess KPI training data from CSV.
 
     Args:
         data_path (str): Path to the KPI_train.csv file.
+        exclude_columns (list, optional): Columns to exclude from scaling.
 
     Returns:
         np.ndarray: Scaled training data.
@@ -124,15 +125,29 @@ def load_normal_data_kpi(data_path):
     # Read the CSV file
     data = pd.read_csv(data_path)
 
-    # If your data has multiple metrics, select the relevant columns
-    # Example: ['metric1', 'metric2', 'metric3']
-    # Adjust the column names based on your actual data
-    # For demonstration, we'll assume all columns except 'timestamp' are metrics
-    metric_columns = [col for col in data.columns if col.lower() not in ['timestamp', 'time', 'date']]
-    data = data[metric_columns]
+    # Display columns and their data types for debugging
+    print("\nColumns in the CSV and their data types:")
+    print(data.dtypes)
+
+    # Exclude specified columns if provided
+    if exclude_columns:
+        metric_columns = [col for col in data.columns if col not in exclude_columns]
+    else:
+        # Automatically select only numeric columns
+        metric_columns = data.select_dtypes(include=[np.number]).columns.tolist()
+
+    print(f"\nSelected metric columns for scaling: {metric_columns}")
+
+    # Ensure that the selected columns are indeed numeric
+    data = data[metric_columns].apply(pd.to_numeric, errors='coerce')
 
     # Handle missing values if any
     data = data.fillna(method='ffill').fillna(method='bfill')
+
+    # Verify that all data is numeric
+    if data.isnull().values.any():
+        missing_cols = data.columns[data.isnull().any()].tolist()
+        raise ValueError(f"Data contains non-numeric values in columns: {missing_cols}. Please check the CSV file.")
 
     # Scale the data
     scaler = StandardScaler()
@@ -182,7 +197,8 @@ except FileNotFoundError as e:
     sys.exit(1)
 
 # Load and scale the training data
-x_train = load_normal_data_kpi(kpi_train_csv)
+# Exclude non-numeric columns like 'id' if present
+x_train = load_normal_data_kpi(kpi_train_csv, exclude_columns=['id', 'timestamp', 'time', 'date'])
 print(f"Loaded and scaled training data from {kpi_train_csv}")
 
 # Load the test data
@@ -992,7 +1008,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     kpi_test_hdf = find_file(test_extract_dir, '*.hdf')  # Already set earlier
 
     # Load and preprocess training data
-    x_train = load_normal_data_kpi(kpi_train_csv)
+    x_train = load_normal_data_kpi(kpi_train_csv, exclude_columns=['id', 'timestamp', 'time', 'date'])
 
     # Train the VAE
     original_dim = x_train.shape[1]  # Number of features, e.g., 3
@@ -1026,6 +1042,11 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     else:
         env.rewardfnc = RNNBinaryRewardFuc  # Without adaptive tau
 
+    # Ensure that RNNBinaryStateFuc is defined or imported
+    # Replace this with the actual state function if it's defined elsewhere
+    # For example:
+    # env.statefnc = RNNBinaryStateFuc
+    # Here, we'll assume it's defined elsewhere in your code
     env.statefnc = RNNBinaryStateFuc  # Ensure this function is defined or imported
     env.timeseries_curser_init = n_steps
     env.datasetfix = DATAFIXED
