@@ -940,16 +940,16 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     # Paths to your KPI data
     #kpi_train_zip = r'path_to_your_data/KPI_train.csv.zip'
     #kpi_test_zip = r'path_to_your_data/KPI_ground_truth.hdf.zip'
-    kpi_train_zip = r'KPI_train.csv.zip'
-    kpi_test_zip = r'KPI_ground_truth.hdf.zip'
+    kpi_train_zip = 'KPI_train.csv.zip'
+    kpi_test_zip = 'KPI_ground_truth.hdf.zip'
 
     # Extract the zip files
     unzip_file(kpi_train_zip, 'KPI_data/train')
     unzip_file(kpi_test_zip, 'KPI_data/test')
 
     # Paths to the extracted files
-    kpi_train_csv = os.path.join('KPI_data', 'train', 'KPI_train.csv')  # Adjust if different
-    kpi_test_hdf = os.path.join('KPI_data', 'test', 'KPI_ground_truth.hdf')  # Adjust if different
+    kpi_train_csv = os.path.join('KPI_train.csv', 'phase2_train.csv')
+    kpi_test_hdf = os.path.join('KPI_ground_truth.hdf', 'phase2_ground_truth.hdf')
 
     # Load and preprocess training data
     x_train = load_normal_data_kpi(kpi_train_csv)
