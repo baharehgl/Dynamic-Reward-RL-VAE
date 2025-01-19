@@ -938,8 +938,10 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
         float: Optimization metric (e.g., F1-score).
     """
     # Paths to your KPI data
-    kpi_train_zip = r'path_to_your_data/KPI_train.csv.zip'  # Replace with actual path
-    kpi_test_zip = r'path_to_your_data/KPI_ground_truth.hdf.zip'  # Replace with actual path
+    #kpi_train_zip = r'path_to_your_data/KPI_train.csv.zip'
+    #kpi_test_zip = r'path_to_your_data/KPI_ground_truth.hdf.zip'
+    kpi_train_zip = r'KPI_train.csv.zip'
+    kpi_test_zip = r'KPI_ground_truth.hdf.zip'
 
     # Extract the zip files
     unzip_file(kpi_train_zip, 'KPI_data/train')
