@@ -19,6 +19,7 @@ from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
 from mpl_toolkits.mplot3d import axes3d
 from collections import deque, namedtuple
+import glob
 
 # Import the custom environment
 # Ensure that the path to the custom environment is correct
@@ -72,13 +73,13 @@ def unzip_file(zip_path, extract_to):
         zip_ref.extractall(extract_to)
     print(f"Extracted {zip_path} to {extract_to}")
 
-# Paths to your zip files
-kpi_train_zip = "KPI_train.csv.zip"
-kpi_test_zip = "KPI_ground_truth.hdf.zip"
+# Relative paths to your zip files (assuming they are in the same directory as the script)
+kpi_train_zip = os.path.join(current_dir, "KPI_train.csv.zip")
+kpi_test_zip = os.path.join(current_dir, "KPI_ground_truth.hdf.zip")
 
 # Extraction directories
-train_extract_dir = 'KPI_data/train'
-test_extract_dir = 'KPI_data/test'
+train_extract_dir = os.path.join(current_dir, 'KPI_data', 'train')
+test_extract_dir = os.path.join(current_dir, 'KPI_data', 'test')
 
 # Create directories if they don't exist
 os.makedirs(train_extract_dir, exist_ok=True)
@@ -89,6 +90,26 @@ unzip_file(kpi_train_zip, train_extract_dir)
 unzip_file(kpi_test_zip, test_extract_dir)
 
 # --------------------------- Data Loading ---------------------------
+
+def find_file(directory, pattern):
+    """
+    Find a file in a directory matching the given pattern.
+
+    Args:
+        directory (str): Directory to search in.
+        pattern (str): Pattern to match file names.
+
+    Returns:
+        str: Path to the first matching file.
+
+    Raises:
+        FileNotFoundError: If no matching file is found.
+    """
+    search_path = os.path.join(directory, pattern)
+    files = glob.glob(search_path)
+    if not files:
+        raise FileNotFoundError(f"No file matching pattern '{pattern}' found in directory '{directory}'")
+    return files[0]
 
 def load_normal_data_kpi(data_path):
     """
@@ -147,11 +168,18 @@ def load_test_data_kpi(data_path):
     df = pd.DataFrame(data, columns=['metric1', 'metric2', 'metric3'])  # Adjust based on actual data
     df['anomaly'] = labels  # Add the anomaly labels
 
+    # Create a 'value' column as the mean of all metrics
+    df['value'] = df[['metric1', 'metric2', 'metric3']].mean(axis=1)
+
     return df
 
-# Paths to the extracted files
-kpi_train_csv = os.path.join(train_extract_dir, 'KPI_train.csv')  # Update if different
-kpi_test_hdf = os.path.join(test_extract_dir, 'KPI_ground_truth.hdf')  # Update if different
+# Dynamically locate the CSV and HDF5 files after extraction
+try:
+    kpi_train_csv = find_file(train_extract_dir, '*.csv')
+    kpi_test_hdf = find_file(test_extract_dir, '*.hdf')
+except FileNotFoundError as e:
+    print(e)
+    sys.exit(1)
 
 # Load and scale the training data
 x_train = load_normal_data_kpi(kpi_train_csv)
@@ -674,6 +702,9 @@ def q_learning(env,
                 print("\nCopied model parameters to target network.\n")
 
             # Sample a minibatch from the replay memory
+            if len(replay_memory) < batch_size:
+                continue  # Skip if not enough samples
+
             samples = random.sample(replay_memory, batch_size)
             states_batch, reward_batch, next_states_batch, done_batch = map(np.array, zip(*samples))
 
@@ -803,7 +834,10 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
         plt.ylabel("Tau Value")
         plt.title("Evolution of Tau during Training")
         plt.legend()
-        tau_plot_path = os.path.join(record_dir, 'tau_evolution.png') if record_dir else 'tau_evolution.png'
+        if record_dir:
+            tau_plot_path = os.path.join(record_dir, 'tau_evolution.png')
+        else:
+            tau_plot_path = 'tau_evolution.png'
         plt.savefig(tau_plot_path)
         plt.close()
         print(f"Tau evolution plot saved to {tau_plot_path}")
@@ -954,8 +988,8 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
         dict: Evaluation metrics.
     """
     # Paths to your KPI data
-    kpi_train_csv = os.path.join(train_extract_dir, 'KPI_train.csv')  # Update if different
-    kpi_test_hdf = os.path.join(test_extract_dir, 'KPI_ground_truth.hdf')  # Update if different
+    kpi_train_csv = find_file(train_extract_dir, '*.csv')  # Already set earlier
+    kpi_test_hdf = find_file(test_extract_dir, '*.hdf')  # Already set earlier
 
     # Load and preprocess training data
     x_train = load_normal_data_kpi(kpi_train_csv)
@@ -968,7 +1002,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
     print("Training VAE...")
     vae.fit(x_train, x_train, epochs=50, batch_size=32, validation_split=0.1)
-    vae_save_path = 'vae_model_kpi.h5'
+    vae_save_path = os.path.join(current_dir, 'vae_model_kpi.h5')
     vae.save(vae_save_path)
     print(f"VAE trained and saved to {vae_save_path}")
 
@@ -992,7 +1026,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     else:
         env.rewardfnc = RNNBinaryRewardFuc  # Without adaptive tau
 
-    env.statefnc = RNNBinaryStateFuc
+    env.statefnc = RNNBinaryStateFuc  # Ensure this function is defined or imported
     env.timeseries_curser_init = n_steps
     env.datasetfix = DATAFIXED
     env.datasetidx = 0
@@ -1099,4 +1133,3 @@ if __name__ == "__main__":
 
     # Optionally, plot tau evolution for the last training run
     # plot_tau_evolution(record_dir='path_to_save_plot')  # Uncomment and set path if needed
-
