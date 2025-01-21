@@ -189,15 +189,18 @@ class Sampling(layers.Layer):
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     """
-    Build a simple fully-connected VAE for any 'original_dim'.
-    Ensures the reconstruction loss is always (batch, original_dim)
-    by using reduction='none'.
+    Build a VAE that handles single-dimensional inputs (original_dim=1)
+    without raising the 'Invalid reduction dimension' error.
     """
+    from tensorflow.keras import layers, models, losses
+    import tensorflow as tf
+
+    # Inputs
     inputs = layers.Input(shape=(original_dim,))
-    h = layers.Dense(intermediate_dim, activation='relu')(inputs)
-    h = layers.Dense(intermediate_dim, activation='relu')(h)
-    z_mean = layers.Dense(latent_dim)(h)
-    z_log_var = layers.Dense(latent_dim)(h)
+    x = layers.Dense(intermediate_dim, activation='relu')(inputs)
+    x = layers.Dense(intermediate_dim, activation='relu')(x)
+    z_mean = layers.Dense(latent_dim)(x)
+    z_log_var = layers.Dense(latent_dim)(x)
 
     # Reparameterization trick
     class Sampling(layers.Layer):
@@ -215,27 +218,35 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(decoder_h)
     decoder_mean = layers.Dense(original_dim, activation='sigmoid')(decoder_h)
 
-    # Models
+    # Full VAE model & separate encoder
     vae = models.Model(inputs, decoder_mean, name="vae")
     encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
 
-    # Use BinaryCrossentropy with no internal reduction
-    # => returns shape (batch, original_dim)
-    bce = tf.keras.losses.BinaryCrossentropy(from_logits=False,
-                                             reduction=tf.keras.losses.Reduction.NONE)
-    reconstruction_loss = bce(inputs, decoder_mean)  # shape (batch, original_dim)
-    # Sum over each feature dimension to get shape (batch,)
-    reconstruction_loss = tf.reduce_sum(reconstruction_loss, axis=1)
+    # Instead of calling losses.binary_crossentropy(...) directly,
+    # we define a BinaryCrossentropy with `reduction='none'`,
+    # which yields a per-sample loss of shape (batch,).
+    bce = losses.BinaryCrossentropy(from_logits=False, reduction=losses.Reduction.NONE)
 
-    # KL divergence
-    kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
+    # reconstruction_loss => shape (batch,)
+    reconstruction_loss = bce(inputs, decoder_mean)
 
-    # Combine
-    vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
+    # KL loss => shape (batch,)
+    kl_loss = -0.5 * tf.reduce_sum(
+        1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var),
+        axis=1
+    )
+
+    # total loss => shape (batch,); we then do mean across the batch
+    total_loss = reconstruction_loss + kl_loss
+    vae_loss = tf.reduce_mean(total_loss)
+
+    # Add to model and compile
     vae.add_loss(vae_loss)
     vae.compile(optimizer='adam')
 
     return vae, encoder
+
+
 # ------------------------------------------------------------------------
 # DRO and Tau Scaling
 def kl_divergence(p, q):
