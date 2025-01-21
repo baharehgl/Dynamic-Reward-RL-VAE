@@ -19,7 +19,7 @@ class EnvTimeSeriesfromRepo():
     """
 
     def __init__(self,
-                 repodir='environment/time_series_repo/',
+                 repodir='environment/time_series_repo_ext/',
                  n_steps=25,
                  datasetfix=0):
         """
