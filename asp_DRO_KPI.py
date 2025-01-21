@@ -186,15 +186,28 @@ class Sampling(layers.Layer):
         epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
+
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     """
-    Build a simple fully-connected VAE for 1D or any 'original_dim'.
+    Build a simple fully-connected VAE for any 'original_dim'.
+    Ensures the reconstruction loss is always (batch, original_dim)
+    by using reduction='none'.
     """
     inputs = layers.Input(shape=(original_dim,))
     h = layers.Dense(intermediate_dim, activation='relu')(inputs)
     h = layers.Dense(intermediate_dim, activation='relu')(h)
     z_mean = layers.Dense(latent_dim)(h)
     z_log_var = layers.Dense(latent_dim)(h)
+
+    # Reparameterization trick
+    class Sampling(layers.Layer):
+        def call(self, inputs):
+            z_mean, z_log_var = inputs
+            batch = tf.shape(z_mean)[0]
+            dim = tf.shape(z_mean)[1]
+            epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
+            return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+
     z = Sampling()([z_mean, z_log_var])
 
     # Decoder
@@ -202,17 +215,27 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(decoder_h)
     decoder_mean = layers.Dense(original_dim, activation='sigmoid')(decoder_h)
 
+    # Models
     vae = models.Model(inputs, decoder_mean, name="vae")
     encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
 
-    reconstruction_loss = losses.binary_crossentropy(inputs, decoder_mean)
+    # Use BinaryCrossentropy with no internal reduction
+    # => returns shape (batch, original_dim)
+    bce = tf.keras.losses.BinaryCrossentropy(from_logits=False,
+                                             reduction=tf.keras.losses.Reduction.NONE)
+    reconstruction_loss = bce(inputs, decoder_mean)  # shape (batch, original_dim)
+    # Sum over each feature dimension to get shape (batch,)
     reconstruction_loss = tf.reduce_sum(reconstruction_loss, axis=1)
+
+    # KL divergence
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
+
+    # Combine
     vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
     vae.add_loss(vae_loss)
     vae.compile(optimizer='adam')
-    return vae, encoder
 
+    return vae, encoder
 # ------------------------------------------------------------------------
 # DRO and Tau Scaling
 def kl_divergence(p, q):
