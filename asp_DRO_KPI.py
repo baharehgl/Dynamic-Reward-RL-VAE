@@ -21,6 +21,7 @@ from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 from collections import deque, namedtuple
 import glob
+tf.compat.v1.disable_eager_execution()
 
 # ------------------------------------------------------------------------
 # Custom environment import
