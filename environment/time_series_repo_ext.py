@@ -1,184 +1,236 @@
 import pandas as pd
 import numpy as np
 import random
-import os
-import sklearn.preprocessing
 
 NOT_ANOMALY = 0
 ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 
 
-class EnvTimeSeriesfromRepo():
+class EnvTimeSeriesfromRepo:
     """
-    A revised environment that:
-      1) Loads CSV files from 'repodir' (each must have columns [value, anomaly]).
-      2) Scales 'value' to [0,1] with MinMaxScaler.
-      3) Builds an RNN-friendly state list: each state is a (n_steps,1) window of 'value'.
-      4) Steps through the time series, returning (state, reward, done, info).
+    A custom environment that does NOT read CSV from disk.
+    Instead, you set data via set_train_data(...) or set_test_data(...).
+
+    Each dataset must have columns:
+      'value'   -> numeric time-series data
+      'anomaly' -> ground-truth label (0=normal, 1=anomaly)
+
+    We convert that to a DataFrame with optional 'label'=-1 (for unlabeled).
+
+    The environment then:
+      - Creates sliding-window states of size n_steps, shape (n_steps,1).
+      - On 'reset()', we start at timeseries_curser = n_steps.
+      - On 'step(action)', we compute a reward array = [r0, r1] and move forward.
     """
 
-    def __init__(self,
-                 repodir='environment/',
-                 n_steps=25,
-                 datasetfix=0):
-        """
-        Args:
-            repodir (str): path containing .csv files.
-            n_steps (int): sliding window size for RNN states.
-            datasetfix (int): if 0, cycle through all CSVs; otherwise fix an index.
-        """
-        self.repodir = repodir
-        self.repodirext = []
-
-        for subdir, dirs, files in os.walk(self.repodir):
-            for file in files:
-                if file.endswith('.csv'):
-                    self.repodirext.append(os.path.join(subdir, file))
-
-        if len(self.repodirext) == 0:
-            raise ValueError(f"No .csv files found in {repodir} — can't create environment.")
-
+    def __init__(self, n_steps=25):
         self.n_steps = n_steps
+
+        # The environment can hold separate train/test data, but at any moment
+        # we operate on a single "timeseries" DataFrame (with 'value','anomaly','label').
+        self.train_df = None
+        self.test_df = None
+
+        self.timeseries = None  # Will be the currently active dataset (train or test)
+        self.timeseries_curser = 0
+        self.states_list = []  # list of shape-(n_steps,1) states
         self.action_space_n = len(action_space)
 
-        # Will hold each CSV as a DataFrame of columns: ['value','anomaly','label']
-        self.timeseries_repo = []
+        # By default, let's assume we start with train data
+        self.use_train_data = True
 
-        # Load all CSVs into memory
-        for path_ in self.repodirext:
-            # Expect columns [1,2] => 'value','anomaly'
-            ts = pd.read_csv(path_, usecols=[1, 2], header=0, names=['value','anomaly'])
-            # Mark all labels as -1 initially (unlabeled)
-            ts['label'] = -1
+    def set_train_data(self, x_train):
+        """
+        x_train can be:
+          - A numpy array of shape (N,) or (N,1). We assume anomaly=0 for all rows.
+          - A DataFrame with columns ['value','anomaly']. If anomaly missing, we set anomaly=0.
+        """
+        if isinstance(x_train, np.ndarray):
+            # shape check
+            if len(x_train.shape) == 1:
+                # expand to (N,1)
+                x_train = x_train.reshape(-1, 1)
+            # build a DataFrame
+            df = pd.DataFrame(x_train, columns=['value'])
+            df['anomaly'] = 0  # assume no anomalies in train
+        elif isinstance(x_train, pd.DataFrame):
+            df = x_train.copy()
+            # ensure 'value' column exists
+            if 'value' not in df.columns:
+                raise ValueError("Train DataFrame must have a 'value' column.")
+            if 'anomaly' not in df.columns:
+                df['anomaly'] = 0
+        else:
+            raise ValueError("x_train must be either a NumPy array or a pandas DataFrame.")
 
-            # Convert to float32
-            ts = ts.astype(np.float32)
+        df['label'] = -1  # unlabeled by default
+        self.train_df = df.reset_index(drop=True)
 
-            # Scale 'value' to [0,1]
-            scaler = sklearn.preprocessing.MinMaxScaler()
-            ts['value'] = scaler.fit_transform(ts[['value']])  # shape => (len,1)
+    def set_test_data(self, df_test):
+        """
+        df_test must be a DataFrame with 'value' and 'anomaly' columns.
+        We keep them as is. If there's no 'label' column, set to -1.
+        """
+        if not isinstance(df_test, pd.DataFrame):
+            raise ValueError("df_test must be a pandas DataFrame.")
+        if 'value' not in df_test.columns:
+            raise ValueError("Test DataFrame must have a 'value' column.")
+        if 'anomaly' not in df_test.columns:
+            raise ValueError("Test DataFrame must have an 'anomaly' column.")
 
-            self.timeseries_repo.append(ts.reset_index(drop=True))
+        df = df_test.copy()
+        if 'label' not in df.columns:
+            df['label'] = -1
+        self.test_df = df.reset_index(drop=True)
 
-        self.datasetsize = len(self.repodirext)
-        self.datasetfix = datasetfix
-        self.datasetidx = random.randint(0, self.datasetsize - 1) if self.datasetsize>0 else 0
-        self.datasetrng = self.datasetsize
+    def reset(self, use_train=True):
+        """
+        Reset the environment. If use_train=True, load from self.train_df,
+        else load from self.test_df.
 
-        # We'll track current timeseries as a DataFrame, and a cursor for stepping
-        self.timeseries = None
-        self.timeseries_curser_init = self.n_steps
+        We then build self.states_list (sliding windows),
+        set timeseries_curser = n_steps, and return the initial state.
+        """
+        self.use_train_data = use_train
+
+        if self.use_train_data:
+            if self.train_df is None:
+                raise ValueError("train_df is None. Call set_train_data(...) first.")
+            self.timeseries = self.train_df.copy()
+        else:
+            if self.test_df is None:
+                raise ValueError("test_df is None. Call set_test_data(...) first.")
+            self.timeseries = self.test_df.copy()
+
+        # Build states
+        self.states_list = self._build_all_states(self.timeseries)
+        # Start the cursor at n_steps
         self.timeseries_curser = self.n_steps
 
-        # For building & storing the entire sequence of states
-        self.states_list = []
-
-    def reset(self):
-        """
-        Move to the next dataset (unless datasetfix!=0) and reset the time-series cursor.
-        Build self.states_list as a list of shape-(n_steps,1) states.
-        Returns: The initial state (n_steps,1).
-        """
-        # 1) pick next dataset, or keep the same if datasetfix != 0
-        if self.datasetfix == 0:
-            self.datasetidx = (self.datasetidx + 1) % self.datasetrng
-
-        print(f"Loading dataset: {self.repodirext[self.datasetidx]}")
-        self.timeseries = self.timeseries_repo[self.datasetidx].copy()
-
-        # 2) set the cursor
-        self.timeseries_curser = self.timeseries_curser_init
-
-        # 3) build states_list
-        self.states_list = []
-        n_total = len(self.timeseries)
-        for idx in range(n_total):
-            st = self._build_state(idx)
-            self.states_list.append(st)
-
-        # If we don't even have n_steps rows, states_list can be short
-        # Return an initial state
         if self.timeseries_curser < len(self.states_list):
             return self.states_list[self.timeseries_curser]
         else:
-            # If the series is < n_steps, we can't index timeseries_curser
-            # Return zeros for safety
-            return np.zeros((self.n_steps,1), dtype=np.float32)
+            # If dataset smaller than n_steps, return zero
+            return np.zeros((self.n_steps, 1), dtype=np.float32)
 
-    def _build_state(self, idx):
+    def _build_all_states(self, df):
         """
-        Build a single RNN state by taking the last self.n_steps
-        values of 'value' up to 'idx' (exclusive).
-        Returns shape (n_steps,1).
+        Build a list of shape-(n_steps,1) states for each time index in df.
+        For index i < n_steps, we zero-pad the front.
         """
-        if idx < self.n_steps:
-            # If not enough history, front-pad with zeros
-            pad_len = self.n_steps - idx
-            front_pad = np.zeros(pad_len, dtype=np.float32)
-            val_part  = self.timeseries['value'][:idx].values
-            st_1d     = np.concatenate([front_pad, val_part], axis=0)
-        else:
-            st_1d     = self.timeseries['value'][idx - self.n_steps : idx].values
-        # reshape => (n_steps,1)
-        return st_1d.reshape((self.n_steps, 1))
+        states = []
+        n_total = len(df)
+        for i in range(n_total):
+            if i < self.n_steps:
+                pad_len = self.n_steps - i
+                front_pad = np.zeros(pad_len, dtype=np.float32)
+                val_part = df['value'].values[:i]
+                st_1d = np.concatenate([front_pad, val_part], axis=0)
+            else:
+                st_1d = df['value'].values[i - self.n_steps: i]
+            st_2d = st_1d.reshape(self.n_steps, 1)
+            states.append(st_2d)
+        return states
 
     def step(self, action):
         """
-        Moves one step forward in time (self.timeseries_curser += 1).
-        Returns: (next_state, reward, done, info)
-          next_state: shape (n_steps,1) or possibly [state, state] if your RL code expects 2D
-          reward: [r_if_action0, r_if_action1],
-                  because your RL code wants a 2-element list for the 2 actions
-          done: 1 if we're past the end, else 0
-          info: {}
+        Return (next_state, reward_array, done, info).
+
+        We return a 2-element list for next_state => [st, st],
+        so your RL code can do next_state[action].
+
+        reward_array = [r_if_ACTION0, r_if_ACTION1].
+        We'll fill it based on comparing 'anomaly' vs the chosen action.
+
+        done=1 if we pass beyond data length, else 0.
+        info={}
         """
-        # If we're already at or past end => done
         n_total = len(self.timeseries)
         if self.timeseries_curser >= n_total:
+            # Already done
             done = 1
-            # Provide a final state (just zeros)
-            final_st = np.zeros((self.n_steps,1), dtype=np.float32)
-            # Provide a 2-element reward array => [0,0] by default
+            # final state => zeros
+            final_st = np.zeros((self.n_steps, 1), dtype=np.float32)
             reward_array = [0.0, 0.0]
             return [final_st, final_st], reward_array, done, {}
 
-        # 1) Calculate reward based on ground truth "anomaly" vs action
-        #    We return a 2-element array for the code that does reward[action].
-        #    Example: if anomaly=0 => correct if action=0 => +1 => we do [1, -1].
+        # ground truth label for current index
         true_label = int(self.timeseries.at[self.timeseries_curser, 'anomaly'])
-        if true_label == action:
-            # correct
-            r_value = 1.0
-        else:
-            # incorrect
-            r_value = -1.0
+        # compare to action => +1 if correct, -1 if wrong (simple version).
+        r_value = 1.0 if (true_label == action) else -1.0
 
-        # We create a reward array = [something_for_NOT_ANOMALY, something_for_ANOMALY]
-        # Then we fill the correct index with r_value, the other with 0 or negative, etc.
-        # But in your code, you often do e.g. [TN_Value, FP_Value] or [FN_Value, TP_Value].
-        # We'll keep it simple: [0,0], then put r_value in the chosen action index
-        # so your code can do: reward[action].
+        # reward array => place r_value in the chosen action index
         reward_array = [0.0, 0.0]
         reward_array[action] = r_value
 
-        # 2) Advance cursor
+        # Move forward
         self.timeseries_curser += 1
         done = 1 if (self.timeseries_curser >= n_total) else 0
 
-        # 3) Next state if not done
         if not done:
             st = self.states_list[self.timeseries_curser]
         else:
-            # if done, we can return a final or zero state
-            st = np.zeros((self.n_steps,1), dtype=np.float32)
+            st = np.zeros((self.n_steps, 1), dtype=np.float32)
 
-        # The code in your RL typically expects step() to return 2 states in a list:
-        # e.g. next_state[action], etc. So we do a quick trick: [st, st].
-        # That way your code can do: next_state[action].
-        # If your code is simpler, you can just return st alone.
+        # Return next_state as [st, st], so your RL code can do next_state[action].
         return [st, st], reward_array, done, {}
 
-    # Optionally, a helper if you want to re-build states after changing 'label'
     def get_states_list(self):
+        """
+        Returns the entire list of shape-(n_steps,1) states if needed.
+        Typically not used if you do step-by-step.
+        """
         return self.states_list
+
+    @property
+    def datasetidx(self):
+        """
+        Some legacy references in your RL code might try to read env.datasetidx.
+        We'll just return 0 if we're in train mode, 1 if in test mode.
+        """
+        return 0 if self.use_train_data else 1
+
+    @property
+    def datasetrng(self):
+        """
+        Similarly, we can say we have '2' datasets (train+test).
+        Or just return 1 if you only want to treat them as one.
+        """
+        return 2
+
+    @property
+    def datasetfix(self):
+        """
+        If your code references this, we can store a variable or return a default.
+        """
+        return 0
+
+    @datasetfix.setter
+    def datasetfix(self, val):
+        pass  # ignore or store if needed
+
+    @property
+    def timeseries_curser_init(self):
+        """
+        For code that references this, we can define n_steps as the init cursor.
+        """
+        return self.n_steps
+
+    @timeseries_curser_init.setter
+    def timeseries_curser_init(self, val):
+        # ignore or store if needed
+        pass
+
+    @property
+    def datasetsize(self):
+        """
+        For code that references env.datasetsize, just return 2 (train+test).
+        Or return 1 if you only want a single dataset concept.
+        """
+        if self.train_df is not None and self.test_df is not None:
+            return 2
+        elif self.train_df is not None or self.test_df is not None:
+            return 1
+        else:
+            return 0
