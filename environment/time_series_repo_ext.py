@@ -120,17 +120,21 @@ class EnvTimeSeriesfromRepo:
 
     def _build_all_states(self, df):
         n_total = len(df)
+        stride = 10  # skip factor. 1 => every row, 10 => 1 of 10 rows, etc. --> Avoid 6 M states
         states = []
-        for i in range(n_total):
+
+        # Only loop over i in steps of 'stride'
+        for i in range(0, n_total, stride):
             if i < self._n_steps:
                 pad_len = self._n_steps - i
                 front_pad = np.zeros(pad_len, dtype=np.float32)
-                val_part  = df['value'].values[:i]
+                val_part = df['value'].values[:i]
                 st_1d = np.concatenate([front_pad, val_part], axis=0)
             else:
-                st_1d = df['value'].values[i - self._n_steps : i]
+                st_1d = df['value'].values[i - self._n_steps: i]
             st_2d = st_1d.reshape(self._n_steps, 1)
             states.append(st_2d)
+
         return states
 
     def step(self, action):
