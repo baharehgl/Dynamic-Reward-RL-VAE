@@ -7,10 +7,14 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # For non-interactive environments
+matplotlib.use('Agg')  # For non-interactive
 import matplotlib.pyplot as plt
 from scipy import stats
 import tensorflow as tf
+
+# Disable eager so tf.compat.v1.placeholder works
+tf.compat.v1.disable_eager_execution()
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -22,50 +26,37 @@ from tensorflow.keras.models import load_model
 from collections import deque, namedtuple
 import glob
 
-
-# ------------------------------------------------------------------------
-# Custom environment import
+# Import the environment from environment/time_series_repo_ext.py
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
-try:
-    from environment.time_series_repo_ext import EnvTimeSeriesfromRepo
-except ImportError as e:
-    print("Error importing EnvTimeSeriesfromRepo:", e)
-    sys.exit(1)
+env_dir = os.path.join(current_dir, 'environment')
+sys.path.append(env_dir)
+from time_series_repo_ext import EnvTimeSeriesfromRepo, NOT_ANOMALY, ANOMALY
 
-# ------------------------------------------------------------------------
-# GPU Configuration (optional; can ignore warnings if CPU-only)
-os.environ['CUDA_VISIBLE_DEVICES'] = ""
-
-# ------------------------------------------------------------------------
-# Global Hyperparams
+# Global hyperparams
 DATAFIXED = 0
 EPISODES = 500
 DISCOUNT_FACTOR = 0.5
 EPSILON = 0.5
 EPSILON_DECAY = 1.00
 
-NOT_ANOMALY = 0
-ANOMALY = 1
-action_space = [NOT_ANOMALY, ANOMALY]
-action_space_n = len(action_space)
-
-n_steps = 25        # sliding window length
+n_steps = 25
 n_input_dim = 1
 n_hidden_dim = 128
 
-# Reward numeric values
 TP_Value = 5
 TN_Value = 1
 FP_Value = -1
 FN_Value = -5
 
 validation_separate_ratio = 0.9
-tau_values = []  # Track tau evolution for plotting
+tau_values = []
 
-# ------------------------------------------------------------------------
-# Data Extraction
+NOT_ANOMALY = 0
+ANOMALY = 1
+action_space = [NOT_ANOMALY, ANOMALY]
+action_space_n = len(action_space)
+
+# ------------- KPI Data unzip + load -------------
 def unzip_file(zip_path, extract_to):
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
@@ -85,6 +76,7 @@ if os.path.exists(kpi_test_zip):
     unzip_file(kpi_test_zip, test_extract_dir)
 
 def find_file(directory, pattern):
+    import glob
     search_path = os.path.join(directory, pattern)
     files = glob.glob(search_path)
     if not files:
@@ -136,7 +128,7 @@ def load_test_data_kpi_pandas(data_path, key='data'):
         print("Error: 'anomaly' column not found in the test data.")
         sys.exit(1)
 
-    # create "value" as the mean of numeric columns except these
+    # create "value" as mean of numeric columns except these
     exclude_cols = ['timestamp','anomaly','KPI ID']
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     metric_columns = [c for c in numeric_cols if c not in exclude_cols]
@@ -154,23 +146,15 @@ def load_test_data_kpi(data_path):
 
 try:
     kpi_train_csv = find_file(train_extract_dir, '*.csv')
-    kpi_test_hdf  = find_file(test_extract_dir,  '*.hdf')
+    kpi_test_hdf  = find_file(test_extract_dir, '*.hdf')
 except FileNotFoundError as e:
     print(e)
     sys.exit(1)
 
 list_hdf_keys(kpi_test_hdf)
 
-# ------------------------------------------------------------------------
-# MSE-Based VAE (avoids NaNs if data is not in [0,1])
+# -------------- Build MSE-based VAE ---------------
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
-    """
-    VAE with MSE reconstruction loss (no sigmoid).
-    Helps avoid NaN if data is standard-scaled or negative/large.
-    """
-    import tensorflow as tf
-    from tensorflow.keras import layers, models
-
     inputs = layers.Input(shape=(original_dim,))
     x = layers.Dense(intermediate_dim, activation='relu')(inputs)
     x = layers.Dense(intermediate_dim, activation='relu')(x)
@@ -186,33 +170,21 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
             return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
     z = Sampling()([z_mean, z_log_var])
-
-    # Decoder
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(z)
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(decoder_h)
-    # Linear output => shape (original_dim,)
     decoder_out = layers.Dense(original_dim)(decoder_h)
 
     vae = models.Model(inputs, decoder_out, name="vae")
-    # (Optional) define encoder separately
     encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
 
-    # MSE reconstruction => shape (batch, original_dim)
-    # Then reduce_sum => (batch,)
     reconstruction_loss = tf.reduce_sum(tf.square(inputs - decoder_out), axis=1)
-    # KL divergence => (batch,)
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
-
     total_loss = reconstruction_loss + kl_loss
     vae_loss   = tf.reduce_mean(total_loss)
     vae.add_loss(vae_loss)
-
-    # Use lower LR to help avoid NaNs
     vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))
     return vae, encoder
 
-# ------------------------------------------------------------------------
-# DRO and Tau Scaling
 def kl_divergence(p, q):
     p = np.clip(p, 1e-10, 1)
     q = np.clip(q, 1e-10, 1)
@@ -221,20 +193,17 @@ def kl_divergence(p, q):
 def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, rho=0.5, max_iter=10):
     tau = 1.0
     for _ in range(max_iter):
-        # treat [p, 1-p] as dist
-        p = np.array([preference_strength, 1 - preference_strength])
-        kl_term = kl_divergence(p, np.array([0.5, 0.5]))
+        dist_p = np.array([preference_strength, 1 - preference_strength])
+        kl_term = kl_divergence(dist_p, np.array([0.5, 0.5]))
         grad = -np.log(1 + np.exp(-preference_strength / tau)) + rho - kl_term
         hess = 0.1
         tau  = tau - grad / (hess + 1e-8)
         tau  = np.clip(tau, tau_min, tau_max)
     return tau
 
-# ------------------------------------------------------------------------
-# Reward Functions
+# Rewards
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     if timeseries_curser >= n_steps:
-        # shape => (1, n_steps)
         window = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
         window = np.reshape(window, (1, n_steps))
         vae_reconstruction = vae.predict(window)
@@ -265,8 +234,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
-# ------------------------------------------------------------------------
-# Q-Learning Network
+# Q-Learning network
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.001), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -274,9 +242,9 @@ class Q_Estimator_Nonlinear():
 
         with tf.compat.v1.variable_scope(scope):
             self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
-                                                 dtype=tf.float32, name="state")
+                                                  dtype=tf.float32, name="state")
             self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
-                                                  dtype=tf.float32, name="target")
+                                                   dtype=tf.float32, name="target")
 
             lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim, forget_bias=1.0)
             state_unstack = tf.unstack(self.state, n_steps, axis=1)
@@ -295,6 +263,7 @@ class Q_Estimator_Nonlinear():
             self.global_step = tf.Variable(0, name="global_step", trainable=False)
             self.train_op    = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
+            # Summaries
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
                 tf.compat.v1.summary.scalar("loss", self.loss),
@@ -335,7 +304,7 @@ def copy_model_parameters(sess, estimator1, estimator2):
 
 def make_epsilon_greedy_policy(estimator, nA):
     def policy_fn(observation, epsilon, sess=None):
-        obs_batch = np.expand_dims(observation, axis=0)  # shape => (1, n_steps, n_input_dim)
+        obs_batch = np.expand_dims(observation, axis=0)
         q_values = estimator.predict(obs_batch, sess=sess)[0]
         A = np.ones(nA, dtype='float32') * epsilon / nA
         best_action = np.argmax(q_values)
@@ -345,8 +314,6 @@ def make_epsilon_greedy_policy(estimator, nA):
 
 Transition = namedtuple("Transition", ["state", "action", "reward", "next_state", "done"])
 
-# ------------------------------------------------------------------------
-# Active Learning & Warm-Up
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
@@ -366,7 +333,7 @@ class active_learning(object):
             distances.append(abs(margin))
 
         distances = np.array(distances)
-        rank_ind  = np.argsort(distances)  # ascending => smallest margin first
+        rank_ind  = np.argsort(distances)
         rank_ind  = [i for i in rank_ind if i not in self.already_selected]
         active_samples = rank_ind[:self.N]
         return active_samples
@@ -382,8 +349,6 @@ class WarmUp(object):
         clf.fit(X_train)
         return clf
 
-# ------------------------------------------------------------------------
-# State Function
 def RNNBinaryStateFuc(timeseries, timeseries_curser):
     if timeseries_curser < n_steps:
         pad_length = n_steps - timeseries_curser
@@ -394,8 +359,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser):
         state_1d   = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
     return np.reshape(state_1d, (n_steps, n_input_dim))
 
-# ------------------------------------------------------------------------
-# Main Q-Learning
+# The main Q-learning function
 def q_learning(env,
                sess,
                q_estimator,
@@ -414,6 +378,10 @@ def q_learning(env,
                num_LabelPropagation=20,
                num_active_learning=5,
                test=False):
+
+    from collections import deque
+    import random
+
     checkpoint_dir  = os.path.join(experiment_dir, "checkpoints")
     checkpoint_path = os.path.join(checkpoint_dir, "model")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -431,10 +399,8 @@ def q_learning(env,
     policy = make_epsilon_greedy_policy(q_estimator, env.action_space_n)
     total_t = sess.run(q_estimator.global_step)
 
-    # ------------------ Warm-up using isolation forest ------------------
     print("Populating replay memory with a warm-up approach...\n")
     outliers_fraction = 0.01
-    # Gather states from environment
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
@@ -457,27 +423,24 @@ def q_learning(env,
             action = int(anomaly_score < 0.0)
             next_state, reward, done, _ = env.step(action)
 
-            transition = Transition(
+            replay_memory.append(Transition(
                 state=state,
                 action=action,
                 reward=reward[action],
                 next_state=next_state[action],
                 done=done
-            )
-            replay_memory.append(transition)
+            ))
             steps_populated += 1
             if done or steps_populated >= replay_memory_init_size:
                 break
 
     print(f"Replay memory populated with {len(replay_memory)} transitions.\n")
 
-    # ------------------ Main Training Loop ------------------
     for i_episode in range(num_episodes):
         if i_episode % 50 == 0:
             saver.save(sess, checkpoint_path)
             print(f"Checkpoint saved at episode {i_episode}.")
 
-        # Reset environment
         state = env.reset()
         done  = False
 
@@ -510,7 +473,6 @@ def q_learning(env,
                 pseudo_label = lp_model.transduction_[cid]
                 env.timeseries.at[cid, 'label'] = pseudo_label
 
-        # "mini-epoch"
         idx_list = list(range(len(env.states_list)))
         for epoch_step in range(num_epoches):
             random.shuffle(idx_list)
@@ -532,7 +494,6 @@ def q_learning(env,
                     done=done
                 ))
 
-                # Only sample if we have enough in memory
                 if len(replay_memory) >= batch_size:
                     samples = random.sample(replay_memory, batch_size)
                     states_batch = []
@@ -543,9 +504,9 @@ def q_learning(env,
                         states_batch.append(t_.state)
                         next_states_batch.append(t_.next_state)
 
-                    states_batch     = np.array(states_batch)
-                    next_states_batch= np.array(next_states_batch)
-                    q_next    = target_estimator.predict(next_states_batch, sess=sess)
+                    states_batch = np.array(states_batch)
+                    next_states_batch = np.array(next_states_batch)
+                    q_next = target_estimator.predict(next_states_batch, sess=sess)
                     q_current = q_estimator.predict(states_batch, sess=sess)
 
                     for i_b, t_ in enumerate(samples):
@@ -570,9 +531,8 @@ def q_learning(env,
     saver.save(sess, checkpoint_path)
     print("Final model saved.")
 
-# ------------------------------------------------------------------------
-# Evaluation
 def evaluate_model(y_true, y_pred):
+    from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, matthews_corrcoef
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     precision = precision_score(y_true, y_pred, zero_division=1)
     recall    = recall_score(y_true, y_pred, zero_division=1)
@@ -638,14 +598,12 @@ def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=T
 
     return results
 
-# ------------------------------------------------------------------------
-# Training Wrapper
 def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     # 1) Load data
     x_train = load_normal_data_kpi(kpi_train_csv, exclude_columns=['timestamp','label','KPI ID'])
     df_test = load_test_data_kpi(kpi_test_hdf)
 
-    # 2) Build and train VAE using MSE
+    # 2) VAE
     original_dim = 1
     latent_dim   = 2
     intermediate_dim = 16
@@ -658,11 +616,10 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     vae.save(vae_save_path)
     print(f"VAE saved to {vae_save_path}")
 
-    # 3) Create environment
-    env = EnvTimeSeriesfromRepo()
-    env.set_train_data(x_train)
-    env.set_test_data(df_test)
-
+    # 3) Env
+    env = EnvTimeSeriesfromRepo(n_steps=25)
+    env.set_train_data(x_train)  # treat train as no anomalies
+    env.set_test_data(df_test)   # must have 'value','anomaly'
     if learn_tau:
         env.rewardfnc = lambda ts, cur, act: RNNBinaryRewardFuc(ts, cur, act, vae=vae)
     else:
@@ -672,14 +629,13 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     env.datasetfix = DATAFIXED
     env.datasetidx = 0
 
-    # Test environment
-    env_test = EnvTimeSeriesfromRepo()
+    env_test = EnvTimeSeriesfromRepo(n_steps=25)
     env_test.set_train_data(x_train)
     env_test.set_test_data(df_test)
     env_test.rewardfnc = RNNBinaryRewardFucTest
-    env_test.statefnc  = RNNBinaryStateFuc
+    env_test.statefnc = RNNBinaryStateFuc
 
-    # 4) Setup Q Estimators + train
+    # 4) Q Estimators
     exp_dir = os.path.abspath("./exp/AdaptiveTauRL/")
     os.makedirs(exp_dir, exist_ok=True)
     tf.compat.v1.reset_default_graph()
@@ -691,7 +647,6 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     with sess.as_default():
         sess.run(tf.compat.v1.global_variables_initializer())
 
-        # Lower batch_size=8 by default to avoid sampling errors
         q_learning(env=env,
                    sess=sess,
                    q_estimator=q_estimator,
@@ -712,15 +667,10 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
                    test=False)
 
         # 5) Validate
-        metrics = q_learning_validator(env_test, q_estimator,
-                                       num_episodes=1,
-                                       record_dir=exp_dir,
-                                       plot=True)
+        metrics = q_learning_validator(env_test, q_estimator, num_episodes=1, record_dir=exp_dir, plot=True)
         print("Validation metrics:", metrics)
         return metrics
 
-# ------------------------------------------------------------------------
-# Main
 if __name__ == "__main__":
     try:
         print("\n--- Starting Training Run ---")
@@ -728,21 +678,3 @@ if __name__ == "__main__":
         print("Final Results:", results)
     except Exception as e:
         print("Error during training:", e)
-
-    # Uncomment if you want multiple runs:
-    """
-    try:
-        print("\n--- Training Run 1 ---")
-        metric1 = train(num_LP=100, num_AL=30, discount_factor=0.92, learn_tau=True)
-        print("Run 1 Metrics:", metric1)
-
-        print("\n--- Training Run 2 ---")
-        metric2 = train(num_LP=150, num_AL=50, discount_factor=0.94, learn_tau=True)
-        print("Run 2 Metrics:", metric2)
-
-        print("\n--- Training Run 3 ---")
-        metric3 = train(num_LP=200, num_AL=100, discount_factor=0.96, learn_tau=True)
-        print("Run 3 Metrics:", metric3)
-    except Exception as e:
-        print("Error in multiple runs:", e)
-    """
