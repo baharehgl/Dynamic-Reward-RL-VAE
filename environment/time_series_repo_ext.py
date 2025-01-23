@@ -7,16 +7,16 @@ action_space = [NOT_ANOMALY, ANOMALY]
 
 class EnvTimeSeriesfromRepo:
     """
-    An environment that uses data from set_train_data(...) or set_test_data(...),
-    and builds one sliding-window state for every 'stride' rows instead of every row.
-    This reduces states from e.g. 6 million to ~600k if stride=10.
+    Environment that uses data from set_train_data / set_test_data,
+    creates sliding-window states for every 'stride' rows (downsampling).
     """
 
     def __init__(self, n_steps=25, stride=10):
         """
         Args:
-            n_steps (int): size of the sliding window for each state.
-            stride (int): skip factor; e.g., 10 => keep 1 row in every 10.
+            n_steps (int): length of sliding window per state.
+            stride (int): skip factor for downsampling. e.g. stride=10 =>
+                          build a state from row 0,10,20,...
         """
         self._n_steps = n_steps
         self._stride  = stride
@@ -34,9 +34,6 @@ class EnvTimeSeriesfromRepo:
 
         self.action_space_n = len(action_space)
 
-    # ----------------------------------------------------------------
-    # Properties (to avoid "can't set attribute" errors)
-    # ----------------------------------------------------------------
     @property
     def datasetfix(self):
         return self._datasetfix
@@ -76,9 +73,6 @@ class EnvTimeSeriesfromRepo:
     def datasetrng(self):
         return self.datasetsize
 
-    # ----------------------------------------------------------------
-    # Setting data
-    # ----------------------------------------------------------------
     def set_train_data(self, x_train):
         df = self._convert_to_df(x_train, is_train=True)
         self._train_df = df
@@ -107,13 +101,11 @@ class EnvTimeSeriesfromRepo:
             df['label'] = -1
         return df.reset_index(drop=True)
 
-    # ----------------------------------------------------------------
-    # Reset & Step
-    # ----------------------------------------------------------------
     def reset(self):
         if self.datasetsize == 0:
-            raise ValueError("No train/test data set. Call set_train_data(...) / set_test_data(...) first.")
+            raise ValueError("No train/test data set. Call set_train_data(...) or set_test_data(...) first.")
 
+        # pick train if datasetidx=0, test if datasetidx=1
         if self._datasetidx == 0:
             if self._train_df is None:
                 raise ValueError("Train data not set, but datasetidx=0.")
@@ -129,14 +121,13 @@ class EnvTimeSeriesfromRepo:
         if self.timeseries_curser < len(self.states_list):
             return self.states_list[self.timeseries_curser]
         else:
-            # Not enough data
+            import numpy as np
             return np.zeros((self._n_steps,1), dtype=np.float32)
 
     def _build_all_states(self, df):
         """
-        Build a list of shape-(n_steps,1) states by skipping with self._stride.
-        E.g., if stride=10, we take row 0,10,20,... as 'end' of a sliding window.
-        Avoiding 6 M states
+        Build shape-(n_steps,1) states by skipping w/ self._stride
+        (like row 0,10,20,...).
         """
         n_total = len(df)
         states = []
@@ -153,18 +144,17 @@ class EnvTimeSeriesfromRepo:
         return states
 
     def step(self, action):
-        n_total = len(self.states_list)
-        if self.timeseries_curser >= n_total:
+        n_total_states = len(self.states_list)
+        if self.timeseries_curser >= n_total_states:
             done = 1
             final_st = np.zeros((self._n_steps,1), dtype=np.float32)
             reward_array = [0.0, 0.0]
             return [final_st, final_st], reward_array, done, {}
 
-        # Convert self.timeseries_curser -> the corresponding row index in df
-        # For example, if stride=10, index in states_list = i => actual row in df is i*self._stride.
+        # Map from states_list index -> real row in DF
         df_row = self.timeseries_curser * self._stride
         if df_row >= len(self.timeseries):
-            # If for some reason this surpasses the actual data length
+            # no actual data left
             done = 1
             final_st = np.zeros((self._n_steps,1), dtype=np.float32)
             reward_array = [0.0, 0.0]
@@ -177,11 +167,12 @@ class EnvTimeSeriesfromRepo:
         reward_array[action] = r_value
 
         self.timeseries_curser += 1
-        done = 1 if (self.timeseries_curser >= n_total) else 0
+        done = 1 if (self.timeseries_curser >= n_total_states) else 0
 
         if not done:
             st = self.states_list[self.timeseries_curser]
         else:
+            import numpy as np
             st = np.zeros((self._n_steps,1), dtype=np.float32)
 
         return [st, st], reward_array, done, {}
