@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import zipfile
 import itertools
 import random
@@ -12,8 +11,9 @@ import matplotlib.pyplot as plt
 from scipy import stats
 import tensorflow as tf
 
-# Disable eager so tf.compat.v1.placeholder works
+# ---------- Disable Eager Execution for TF1.x placeholders ----------
 tf.compat.v1.disable_eager_execution()
+# ---------------------------------------------------------------------
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
@@ -26,18 +26,27 @@ from tensorflow.keras.models import load_model
 from collections import deque, namedtuple
 import glob
 
-# Import the environment from environment/time_series_repo_ext.py
+# Import environment from environment/time_series_repo_ext.py
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_dir = os.path.join(current_dir, 'environment')
 sys.path.append(env_dir)
-from time_series_repo_ext import EnvTimeSeriesfromRepo, NOT_ANOMALY, ANOMALY
+try:
+    from time_series_repo_ext import EnvTimeSeriesfromRepo
+except ImportError as e:
+    print("Error importing EnvTimeSeriesfromRepo:", e)
+    sys.exit(1)
 
-# Global hyperparams
+# Global Hyperparams
 DATAFIXED = 0
 EPISODES = 500
 DISCOUNT_FACTOR = 0.5
 EPSILON = 0.5
 EPSILON_DECAY = 1.00
+
+NOT_ANOMALY = 0
+ANOMALY = 1
+action_space = [NOT_ANOMALY, ANOMALY]
+action_space_n = len(action_space)
 
 n_steps = 25
 n_input_dim = 1
@@ -51,12 +60,7 @@ FN_Value = -5
 validation_separate_ratio = 0.9
 tau_values = []
 
-NOT_ANOMALY = 0
-ANOMALY = 1
-action_space = [NOT_ANOMALY, ANOMALY]
-action_space_n = len(action_space)
-
-# ------------- KPI Data unzip + load -------------
+# ---- KPI Data unzip / load
 def unzip_file(zip_path, extract_to):
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
@@ -120,7 +124,6 @@ def load_test_data_kpi_pandas(data_path, key='data'):
     print("\nLoaded DataFrame head:")
     print(df.head())
 
-    # rename "label" -> "anomaly" if needed
     if 'anomaly' not in df.columns and 'label' in df.columns:
         df.rename(columns={'label': 'anomaly'}, inplace=True)
 
@@ -128,7 +131,6 @@ def load_test_data_kpi_pandas(data_path, key='data'):
         print("Error: 'anomaly' column not found in the test data.")
         sys.exit(1)
 
-    # create "value" as mean of numeric columns except these
     exclude_cols = ['timestamp','anomaly','KPI ID']
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     metric_columns = [c for c in numeric_cols if c not in exclude_cols]
@@ -146,15 +148,18 @@ def load_test_data_kpi(data_path):
 
 try:
     kpi_train_csv = find_file(train_extract_dir, '*.csv')
-    kpi_test_hdf  = find_file(test_extract_dir, '*.hdf')
+    kpi_test_hdf  = find_file(test_extract_dir,  '*.hdf')
 except FileNotFoundError as e:
     print(e)
     sys.exit(1)
 
 list_hdf_keys(kpi_test_hdf)
 
-# -------------- Build MSE-based VAE ---------------
+# ---- Build MSE-based VAE
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
+    from tensorflow.keras import layers, models
+    import tensorflow as tf
+
     inputs = layers.Input(shape=(original_dim,))
     x = layers.Dense(intermediate_dim, activation='relu')(inputs)
     x = layers.Dense(intermediate_dim, activation='relu')(x)
@@ -170,12 +175,12 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
             return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
     z = Sampling()([z_mean, z_log_var])
+
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(z)
     decoder_h = layers.Dense(intermediate_dim, activation='relu')(decoder_h)
     decoder_out = layers.Dense(original_dim)(decoder_h)
 
     vae = models.Model(inputs, decoder_out, name="vae")
-    encoder = models.Model(inputs, [z_mean, z_log_var, z], name="encoder")
 
     reconstruction_loss = tf.reduce_sum(tf.square(inputs - decoder_out), axis=1)
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
@@ -183,7 +188,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae_loss   = tf.reduce_mean(total_loss)
     vae.add_loss(vae_loss)
     vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))
-    return vae, encoder
+    return vae, None  # if you don't need encoder, or create a separate encoder
 
 def kl_divergence(p, q):
     p = np.clip(p, 1e-10, 1)
@@ -201,7 +206,12 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
         tau  = np.clip(tau, tau_min, tau_max)
     return tau
 
-# Rewards
+# Reward functions
+TP_Value = 5
+TN_Value = 1
+FP_Value = -1
+FN_Value = -5
+
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     if timeseries_curser >= n_steps:
         window = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
@@ -234,7 +244,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
-# Q-Learning network
+# Q-learning network etc.
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.001), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -263,7 +273,6 @@ class Q_Estimator_Nonlinear():
             self.global_step = tf.Variable(0, name="global_step", trainable=False)
             self.train_op    = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
-            # Summaries
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
                 tf.compat.v1.summary.scalar("loss", self.loss),
@@ -359,7 +368,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser):
         state_1d   = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
     return np.reshape(state_1d, (n_steps, n_input_dim))
 
-# The main Q-learning function
+# Q-learning loop
 def q_learning(env,
                sess,
                q_estimator,
@@ -378,7 +387,6 @@ def q_learning(env,
                num_LabelPropagation=20,
                num_active_learning=5,
                test=False):
-
     from collections import deque
     import random
 
@@ -399,6 +407,7 @@ def q_learning(env,
     policy = make_epsilon_greedy_policy(q_estimator, env.action_space_n)
     total_t = sess.run(q_estimator.global_step)
 
+    # Warm-up with isolation forest
     print("Populating replay memory with a warm-up approach...\n")
     outliers_fraction = 0.01
     data_train = []
@@ -436,6 +445,7 @@ def q_learning(env,
 
     print(f"Replay memory populated with {len(replay_memory)} transitions.\n")
 
+    # Main training loop
     for i_episode in range(num_episodes):
         if i_episode % 50 == 0:
             saver.save(sess, checkpoint_path)
@@ -473,6 +483,7 @@ def q_learning(env,
                 pseudo_label = lp_model.transduction_[cid]
                 env.timeseries.at[cid, 'label'] = pseudo_label
 
+        # mini-epoch
         idx_list = list(range(len(env.states_list)))
         for epoch_step in range(num_epoches):
             random.shuffle(idx_list)
@@ -504,9 +515,9 @@ def q_learning(env,
                         states_batch.append(t_.state)
                         next_states_batch.append(t_.next_state)
 
-                    states_batch = np.array(states_batch)
-                    next_states_batch = np.array(next_states_batch)
-                    q_next = target_estimator.predict(next_states_batch, sess=sess)
+                    states_batch     = np.array(states_batch)
+                    next_states_batch= np.array(next_states_batch)
+                    q_next    = target_estimator.predict(next_states_batch, sess=sess)
                     q_current = q_estimator.predict(states_batch, sess=sess)
 
                     for i_b, t_ in enumerate(samples):
@@ -564,7 +575,7 @@ def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=T
 
         for t in itertools.count():
             st = env.statefnc(env.timeseries, env.timeseries_curser)
-            action_probs = policy(st, 0.0)  # greedy
+            action_probs = policy(st, 0.0)
             action = np.argmax(action_probs)
             y_true_all.append(env.timeseries.at[env.timeseries_curser, 'anomaly'])
             y_pred_all.append(action)
@@ -603,23 +614,31 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     x_train = load_normal_data_kpi(kpi_train_csv, exclude_columns=['timestamp','label','KPI ID'])
     df_test = load_test_data_kpi(kpi_test_hdf)
 
-    # 2) VAE
+    # 2) Build & train VAE with MSE
     original_dim = 1
     latent_dim   = 2
     intermediate_dim = 16
 
-    vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
+    vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     print("\nTraining VAE on single points (original_dim=1) with MSE...")
-    vae.fit(x_train, x_train, epochs=10, batch_size=32, validation_split=0.1)
+
+    # ---- KEY CHANGE: pass y=None instead of x_train as target
+    vae.fit(x_train,
+            None,
+            epochs=10,
+            batch_size=32,
+            validation_split=0.1)  # or remove validation_split if it complains
 
     vae_save_path = os.path.join(current_dir, 'vae_model_kpi.h5')
     vae.save(vae_save_path)
     print(f"VAE saved to {vae_save_path}")
 
-    # 3) Env
+    # 3) Create environment
+    from time_series_repo_ext import EnvTimeSeriesfromRepo
     env = EnvTimeSeriesfromRepo(n_steps=25)
-    env.set_train_data(x_train)  # treat train as no anomalies
-    env.set_test_data(df_test)   # must have 'value','anomaly'
+    env.set_train_data(x_train)
+    env.set_test_data(df_test)
+
     if learn_tau:
         env.rewardfnc = lambda ts, cur, act: RNNBinaryRewardFuc(ts, cur, act, vae=vae)
     else:
@@ -633,9 +652,9 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     env_test.set_train_data(x_train)
     env_test.set_test_data(df_test)
     env_test.rewardfnc = RNNBinaryRewardFucTest
-    env_test.statefnc = RNNBinaryStateFuc
+    env_test.statefnc  = RNNBinaryStateFuc
 
-    # 4) Q Estimators
+    # 4) Q-Learning
     exp_dir = os.path.abspath("./exp/AdaptiveTauRL/")
     os.makedirs(exp_dir, exist_ok=True)
     tf.compat.v1.reset_default_graph()
@@ -647,6 +666,7 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     with sess.as_default():
         sess.run(tf.compat.v1.global_variables_initializer())
 
+        # Q-learning
         q_learning(env=env,
                    sess=sess,
                    q_estimator=q_estimator,
@@ -666,8 +686,11 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
                    num_active_learning=num_AL,
                    test=False)
 
-        # 5) Validate
-        metrics = q_learning_validator(env_test, q_estimator, num_episodes=1, record_dir=exp_dir, plot=True)
+        # Validate
+        metrics = q_learning_validator(env_test, q_estimator,
+                                       num_episodes=1,
+                                       record_dir=exp_dir,
+                                       plot=True)
         print("Validation metrics:", metrics)
         return metrics
 
