@@ -6,14 +6,13 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # For non-interactive
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import stats
 import tensorflow as tf
 
-# ---------- Disable Eager Execution for TF1.x placeholders ----------
+# Disable Eager Execution to allow TF1.x placeholders
 tf.compat.v1.disable_eager_execution()
-# ---------------------------------------------------------------------
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
@@ -24,9 +23,8 @@ from sklearn.ensemble import IsolationForest
 from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 from collections import deque, namedtuple
-import glob
 
-# Import environment from environment/time_series_repo_ext.py
+# Import environment code
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_dir = os.path.join(current_dir, 'environment')
 sys.path.append(env_dir)
@@ -36,12 +34,12 @@ except ImportError as e:
     print("Error importing EnvTimeSeriesfromRepo:", e)
     sys.exit(1)
 
-# Global Hyperparams
+# Global hyperparams
 DATAFIXED = 0
-EPISODES = 500
-DISCOUNT_FACTOR = 0.5
 EPSILON = 0.5
-EPSILON_DECAY = 1.00
+EPSILON_DECAY = 1.0
+validation_separate_ratio = 0.9
+tau_values = []
 
 NOT_ANOMALY = 0
 ANOMALY = 1
@@ -52,32 +50,19 @@ n_steps = 25
 n_input_dim = 1
 n_hidden_dim = 128
 
+# Reward numeric values
 TP_Value = 5
 TN_Value = 1
 FP_Value = -1
 FN_Value = -5
 
-validation_separate_ratio = 0.9
-tau_values = []
+import glob
 
-# ---- KPI Data unzip / load
 def unzip_file(zip_path, extract_to):
+    import zipfile
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
     print(f"Extracted {zip_path} to {extract_to}")
-
-kpi_train_zip = os.path.join(current_dir, "KPI_train.csv.zip")
-kpi_test_zip  = os.path.join(current_dir, "KPI_ground_truth.hdf.zip")
-
-train_extract_dir = os.path.join(current_dir, 'KPI_data', 'train')
-test_extract_dir  = os.path.join(current_dir, 'KPI_data', 'test')
-os.makedirs(train_extract_dir, exist_ok=True)
-os.makedirs(test_extract_dir, exist_ok=True)
-
-if os.path.exists(kpi_train_zip):
-    unzip_file(kpi_train_zip, train_extract_dir)
-if os.path.exists(kpi_test_zip):
-    unzip_file(kpi_test_zip, test_extract_dir)
 
 def find_file(directory, pattern):
     import glob
@@ -126,7 +111,6 @@ def load_test_data_kpi_pandas(data_path, key='data'):
 
     if 'anomaly' not in df.columns and 'label' in df.columns:
         df.rename(columns={'label': 'anomaly'}, inplace=True)
-
     if 'anomaly' not in df.columns:
         print("Error: 'anomaly' column not found in the test data.")
         sys.exit(1)
@@ -146,6 +130,20 @@ def load_test_data_kpi_pandas(data_path, key='data'):
 def load_test_data_kpi(data_path):
     return load_test_data_kpi_pandas(data_path, key='data')
 
+# set up KPI data folder
+kpi_train_zip = os.path.join(current_dir, "KPI_train.csv.zip")
+kpi_test_zip  = os.path.join(current_dir, "KPI_ground_truth.hdf.zip")
+
+train_extract_dir = os.path.join(current_dir, 'KPI_data', 'train')
+test_extract_dir  = os.path.join(current_dir, 'KPI_data', 'test')
+os.makedirs(train_extract_dir, exist_ok=True)
+os.makedirs(test_extract_dir, exist_ok=True)
+
+if os.path.exists(kpi_train_zip):
+    unzip_file(kpi_train_zip, train_extract_dir)
+if os.path.exists(kpi_test_zip):
+    unzip_file(kpi_test_zip, test_extract_dir)
+
 try:
     kpi_train_csv = find_file(train_extract_dir, '*.csv')
     kpi_test_hdf  = find_file(test_extract_dir,  '*.hdf')
@@ -155,7 +153,6 @@ except FileNotFoundError as e:
 
 list_hdf_keys(kpi_test_hdf)
 
-# ---- Build MSE-based VAE
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     from tensorflow.keras import layers, models
     import tensorflow as tf
@@ -181,14 +178,13 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     decoder_out = layers.Dense(original_dim)(decoder_h)
 
     vae = models.Model(inputs, decoder_out, name="vae")
-
     reconstruction_loss = tf.reduce_sum(tf.square(inputs - decoder_out), axis=1)
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=1)
     total_loss = reconstruction_loss + kl_loss
     vae_loss   = tf.reduce_mean(total_loss)
     vae.add_loss(vae_loss)
     vae.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4))
-    return vae, None  # if you don't need encoder, or create a separate encoder
+    return vae
 
 def kl_divergence(p, q):
     p = np.clip(p, 1e-10, 1)
@@ -206,7 +202,7 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
         tau  = np.clip(tau, tau_min, tau_max)
     return tau
 
-# Reward functions
+# reward
 TP_Value = 5
 TN_Value = 1
 FP_Value = -1
@@ -244,7 +240,8 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
-# Q-learning network etc.
+import tensorflow as tf
+
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.001), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -253,16 +250,16 @@ class Q_Estimator_Nonlinear():
         with tf.compat.v1.variable_scope(scope):
             self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
                                                   dtype=tf.float32, name="state")
-            self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
+            self.target = tf.compat.v1.placeholder(shape=[None, len(action_space)],
                                                    dtype=tf.float32, name="target")
 
             lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim, forget_bias=1.0)
             state_unstack = tf.unstack(self.state, n_steps, axis=1)
             outputs, _ = tf.compat.v1.nn.static_rnn(lstm_cell, state_unstack, dtype=tf.float32)
 
-            self.W_out = tf.compat.v1.get_variable("W_out", shape=[n_hidden_dim, action_space_n],
+            self.W_out = tf.compat.v1.get_variable("W_out", shape=[n_hidden_dim, len(action_space)],
                                                    initializer=tf.compat.v1.random_normal_initializer())
-            self.b_out = tf.compat.v1.get_variable("b_out", shape=[action_space_n],
+            self.b_out = tf.compat.v1.get_variable("b_out", shape=[len(action_space)],
                                                    initializer=tf.compat.v1.constant_initializer(0.0))
             self.action_values = tf.matmul(outputs[-1], self.W_out) + self.b_out
 
@@ -359,6 +356,10 @@ class WarmUp(object):
         return clf
 
 def RNNBinaryStateFuc(timeseries, timeseries_curser):
+    """
+    Typically not used if we rely on env.states_list,
+    but if your RL code calls env.statefnc, it returns shape (n_steps,1).
+    """
     if timeseries_curser < n_steps:
         pad_length = n_steps - timeseries_curser
         front_pad  = np.zeros(pad_length)
@@ -366,15 +367,89 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser):
         state_1d   = np.concatenate([front_pad, val_part], axis=0)
     else:
         state_1d   = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
-    return np.reshape(state_1d, (n_steps, n_input_dim))
+    return np.reshape(state_1d, (n_steps, 1))
 
-# Q-learning loop
+def evaluate_model(y_true, y_pred):
+    from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, matthews_corrcoef
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    precision = precision_score(y_true, y_pred, zero_division=1)
+    recall    = recall_score(y_true, y_pred, zero_division=1)
+    f1        = f1_score(y_true, y_pred, zero_division=1)
+    mcc       = matthews_corrcoef(y_true, y_pred)
+    balanced_acc = (recall + (tn/(tn+fp))) / 2 if (tn+fp)>0 else recall
+    fpr = fp / (fp + tn) if (fp + tn)>0 else 0
+    fnr = fn / (fn + tp) if (fn + tp)>0 else 0
+    return {
+        "Precision": precision,
+        "Recall": recall,
+        "F1-Score": f1,
+        "MCC": mcc,
+        "Balanced Accuracy": balanced_acc,
+        "FPR": fpr,
+        "FNR": fnr
+    }
+
+def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=True):
+    y_true_all = []
+    y_pred_all = []
+    policy = make_epsilon_greedy_policy(estimator, env.action_space_n)
+
+    for i_episode in range(num_episodes):
+        print(f"\nValidation Episode {i_episode+1}/{num_episodes}")
+        env.reset()
+        while env.datasetidx < env.datasetrng * validation_separate_ratio:
+            env.reset()
+
+        # We do a naive approach: step through states by indexing timeseries_curser
+        for t in itertools.count():
+            if env.timeseries_curser >= len(env.states_list):
+                break
+            st = env.states_list[env.timeseries_curser]  # shape (n_steps,1)
+            action_probs = policy(st, 0.0)  # greedy
+            action = np.argmax(action_probs)
+
+            # Convert env.timeseries_curser -> actual DF row
+            df_row = env.timeseries_curser * env._stride
+            if df_row >= len(env.timeseries):
+                break
+            y_true_all.append(env.timeseries.at[df_row, 'anomaly'])
+            y_pred_all.append(action)
+
+            next_state, reward, done, _ = env.step(action)
+            if done:
+                break
+
+    results = evaluate_model(y_true_all, y_pred_all)
+    print("\nValidation Metrics:")
+    for k, v in results.items():
+        print(f"{k}: {v:.4f}")
+
+    if record_dir:
+        with open(os.path.join(record_dir, "validation_metrics.txt"), 'w') as f:
+            for k, v in results.items():
+                f.write(f"{k}: {v:.4f}\n")
+
+    if plot:
+        plt.figure(figsize=(8,4))
+        plt.plot(tau_values, label="Tau")
+        plt.xlabel("Steps (approx)")
+        plt.ylabel("Tau")
+        plt.title("Adaptive Tau Evolution")
+        plt.legend()
+        if record_dir:
+            plt.savefig(os.path.join(record_dir, "tau_evolution.png"))
+        else:
+            plt.savefig("tau_evolution.png")
+        plt.close()
+
+    return results
+
 def q_learning(env,
                sess,
                q_estimator,
                target_estimator,
-               num_episodes,
-               num_epoches,
+               num_episodes=20,
+               num_epoches=5,
                replay_memory_size=5000,
                replay_memory_init_size=500,
                experiment_dir='./log/',
@@ -387,9 +462,8 @@ def q_learning(env,
                num_LabelPropagation=20,
                num_active_learning=5,
                test=False):
-    from collections import deque
-    import random
 
+    from collections import deque
     checkpoint_dir  = os.path.join(experiment_dir, "checkpoints")
     checkpoint_path = os.path.join(checkpoint_dir, "model")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -407,9 +481,11 @@ def q_learning(env,
     policy = make_epsilon_greedy_policy(q_estimator, env.action_space_n)
     total_t = sess.run(q_estimator.global_step)
 
-    # Warm-up with isolation forest
+    # Warm-up
     print("Populating replay memory with a warm-up approach...\n")
     outliers_fraction = 0.01
+
+    # Gather states from environment
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
@@ -424,35 +500,34 @@ def q_learning(env,
     while steps_populated < replay_memory_init_size:
         env.reset()
         for i in range(len(env.states_list)):
-            if env.timeseries_curser < n_steps:
-                continue
-            state = env.states_list[i]
-            state_flat = np.ravel(state).reshape(1, -1)
-            anomaly_score = warm_model.decision_function(state_flat)[0]
-            action = int(anomaly_score < 0.0)
-            next_state, reward, done, _ = env.step(action)
+            if env.timeseries_curser < len(env.states_list) and env.timeseries_curser >= n_steps:
+                state = env.states_list[i]
+                state_flat = np.ravel(state).reshape(1, -1)
+                anomaly_score = warm_model.decision_function(state_flat)[0]
+                action = int(anomaly_score < 0.0)
+                next_state, reward, done, _ = env.step(action)
 
-            replay_memory.append(Transition(
-                state=state,
-                action=action,
-                reward=reward[action],
-                next_state=next_state[action],
-                done=done
-            ))
-            steps_populated += 1
-            if done or steps_populated >= replay_memory_init_size:
-                break
+                replay_memory.append(
+                    Transition(state=state,
+                               action=action,
+                               reward=reward[action],
+                               next_state=next_state[action],
+                               done=done)
+                )
+                steps_populated += 1
+                if done or steps_populated >= replay_memory_init_size:
+                    break
+        if steps_populated >= replay_memory_init_size:
+            break
 
     print(f"Replay memory populated with {len(replay_memory)} transitions.\n")
 
-    # Main training loop
     for i_episode in range(num_episodes):
         if i_episode % 50 == 0:
             saver.save(sess, checkpoint_path)
             print(f"Checkpoint saved at episode {i_episode}.")
 
         state = env.reset()
-        done  = False
 
         # Active Learning
         labeled_index = np.where(env.timeseries['label'] != -1)[0]
@@ -461,27 +536,51 @@ def q_learning(env,
         al_samples = al.get_samples(sess=sess)
         print(f"Active learning picked samples: {al_samples}")
         for idx in al_samples:
-            env.timeseries.at[idx, 'label'] = env.timeseries.at[idx, 'anomaly']
+            df_row = idx * env._stride
+            if df_row < len(env.timeseries):
+                env.timeseries.at[df_row, 'label'] = env.timeseries.at[df_row, 'anomaly']
 
         # Label Propagation
-        lp_model = LabelSpreading()
+        # Build X,y from entire environment
         X = []
         y = []
         for i, st in enumerate(env.states_list):
+            df_row = i * env._stride
+            if df_row >= len(env.timeseries):
+                break
             X.append(np.ravel(st))
-            y_val = env.timeseries.at[i, 'label']
+            y_val = env.timeseries.at[df_row, 'label']
             y.append(y_val if y_val != -1 else -1)
+
         X = np.array(X)
         y = np.array(y, dtype=int)
-        lp_model.fit(X, y)
+
+        # Subsample for label propagation => fix O(N^2) memory
+        MAX_LABELPROP = 5000
+        n_total = len(X)
+        if n_total > MAX_LABELPROP:
+            subset_idx = np.random.choice(n_total, size=MAX_LABELPROP, replace=False)
+            X_sub = X[subset_idx]
+            y_sub = y[subset_idx]
+        else:
+            subset_idx = np.arange(n_total)
+            X_sub = X
+            y_sub = y
+
+        lp_model = LabelSpreading()
+        lp_model.fit(X_sub, y_sub)
 
         pred_entropies = stats.entropy(lp_model.label_distributions_.T)
-        unlabeled_indices = np.where(y == -1)[0]
+        unlabeled_subset = np.where(y_sub == -1)[0]
         certainty_index = np.argsort(pred_entropies)[:num_LabelPropagation]
+
         for cid in certainty_index:
-            if cid in unlabeled_indices:
+            if cid in unlabeled_subset:
                 pseudo_label = lp_model.transduction_[cid]
-                env.timeseries.at[cid, 'label'] = pseudo_label
+                real_idx = subset_idx[cid]  # map back
+                df_row = real_idx * env._stride
+                if df_row < len(env.timeseries):
+                    env.timeseries.at[df_row, 'label'] = pseudo_label
 
         # mini-epoch
         idx_list = list(range(len(env.states_list)))
@@ -515,9 +614,9 @@ def q_learning(env,
                         states_batch.append(t_.state)
                         next_states_batch.append(t_.next_state)
 
-                    states_batch     = np.array(states_batch)
-                    next_states_batch= np.array(next_states_batch)
-                    q_next    = target_estimator.predict(next_states_batch, sess=sess)
+                    states_batch = np.array(states_batch)
+                    next_states_batch = np.array(next_states_batch)
+                    q_next = target_estimator.predict(next_states_batch, sess=sess)
                     q_current = q_estimator.predict(states_batch, sess=sess)
 
                     for i_b, t_ in enumerate(samples):
@@ -542,73 +641,6 @@ def q_learning(env,
     saver.save(sess, checkpoint_path)
     print("Final model saved.")
 
-def evaluate_model(y_true, y_pred):
-    from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score, matthews_corrcoef
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    precision = precision_score(y_true, y_pred, zero_division=1)
-    recall    = recall_score(y_true, y_pred, zero_division=1)
-    f1        = f1_score(y_true, y_pred, zero_division=1)
-    mcc       = matthews_corrcoef(y_true, y_pred)
-    balanced_acc = (recall + (tn/(tn+fp))) / 2 if (tn+fp)>0 else recall
-    fpr = fp / (fp + tn) if (fp + tn)>0 else 0
-    fnr = fn / (fn + tp) if (fn + tp)>0 else 0
-    return {
-        "Precision": precision,
-        "Recall": recall,
-        "F1-Score": f1,
-        "MCC": mcc,
-        "Balanced Accuracy": balanced_acc,
-        "FPR": fpr,
-        "FNR": fnr
-    }
-
-def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=True):
-    y_true_all = []
-    y_pred_all = []
-    policy = make_epsilon_greedy_policy(estimator, env.action_space_n)
-
-    for i_episode in range(num_episodes):
-        print(f"\nValidation Episode {i_episode+1}/{num_episodes}")
-        env.reset()
-        while env.datasetidx < env.datasetrng * validation_separate_ratio:
-            env.reset()
-
-        for t in itertools.count():
-            st = env.statefnc(env.timeseries, env.timeseries_curser)
-            action_probs = policy(st, 0.0)
-            action = np.argmax(action_probs)
-            y_true_all.append(env.timeseries.at[env.timeseries_curser, 'anomaly'])
-            y_pred_all.append(action)
-
-            next_state, reward, done, _ = env.step(action)
-            if done:
-                break
-
-    results = evaluate_model(y_true_all, y_pred_all)
-    print("\nValidation Metrics:")
-    for k, v in results.items():
-        print(f"{k}: {v:.4f}")
-
-    if record_dir:
-        with open(os.path.join(record_dir, "validation_metrics.txt"), 'w') as f:
-            for k, v in results.items():
-                f.write(f"{k}: {v:.4f}\n")
-
-    if plot:
-        plt.figure(figsize=(8,4))
-        plt.plot(tau_values, label="Tau")
-        plt.xlabel("Steps (approx)")
-        plt.ylabel("Tau")
-        plt.title("Adaptive Tau Evolution")
-        plt.legend()
-        if record_dir:
-            plt.savefig(os.path.join(record_dir, "tau_evolution.png"))
-        else:
-            plt.savefig("tau_evolution.png")
-        plt.close()
-
-    return results
-
 def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     # 1) Load data
     x_train = load_normal_data_kpi(kpi_train_csv, exclude_columns=['timestamp','label','KPI ID'])
@@ -619,23 +651,18 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     latent_dim   = 2
     intermediate_dim = 16
 
-    vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
+    vae = build_vae(original_dim, latent_dim, intermediate_dim)
     print("\nTraining VAE on single points (original_dim=1) with MSE...")
 
-    # ---- KEY CHANGE: pass y=None instead of x_train as target
-    vae.fit(x_train,
-            None,
-            epochs=10,
-            batch_size=32,
-            validation_split=0.1)  # or remove validation_split if it complains
+    # pass y=None => because we have add_loss in VAE
+    vae.fit(x_train, None, epochs=10, batch_size=32, validation_split=0.1)
 
     vae_save_path = os.path.join(current_dir, 'vae_model_kpi.h5')
     vae.save(vae_save_path)
     print(f"VAE saved to {vae_save_path}")
 
-    # 3) Create environment
-    from time_series_repo_ext import EnvTimeSeriesfromRepo
-    env = EnvTimeSeriesfromRepo(n_steps=25)
+    # 3) Create environment with stride=10 or 5, etc.
+    env = EnvTimeSeriesfromRepo(n_steps=25, stride=10)
     env.set_train_data(x_train)
     env.set_test_data(df_test)
 
@@ -648,13 +675,14 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     env.datasetfix = DATAFIXED
     env.datasetidx = 0
 
-    env_test = EnvTimeSeriesfromRepo(n_steps=25)
+    # create test env
+    env_test = EnvTimeSeriesfromRepo(n_steps=25, stride=10)
     env_test.set_train_data(x_train)
     env_test.set_test_data(df_test)
     env_test.rewardfnc = RNNBinaryRewardFucTest
     env_test.statefnc  = RNNBinaryStateFuc
 
-    # 4) Q-Learning
+    # 4) Setup Q-Estimators
     exp_dir = os.path.abspath("./exp/AdaptiveTauRL/")
     os.makedirs(exp_dir, exist_ok=True)
     tf.compat.v1.reset_default_graph()
@@ -666,7 +694,7 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     with sess.as_default():
         sess.run(tf.compat.v1.global_variables_initializer())
 
-        # Q-learning
+        # RL training with label propagation + active learning
         q_learning(env=env,
                    sess=sess,
                    q_estimator=q_estimator,
@@ -686,18 +714,19 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
                    num_active_learning=num_AL,
                    test=False)
 
-        # Validate
-        metrics = q_learning_validator(env_test, q_estimator,
+        # 5) Validate
+        results = q_learning_validator(env_test,
+                                       estimator=q_estimator,
                                        num_episodes=1,
                                        record_dir=exp_dir,
                                        plot=True)
-        print("Validation metrics:", metrics)
-        return metrics
+        print("Validation metrics:", results)
+        return results
 
 if __name__ == "__main__":
     try:
         print("\n--- Starting Training Run ---")
-        results = train(num_LP=100, num_AL=30, discount_factor=0.92, learn_tau=True)
-        print("Final Results:", results)
+        final_results = train(num_LP=100, num_AL=30, discount_factor=0.92, learn_tau=True)
+        print("Final Results:", final_results)
     except Exception as e:
         print("Error during training:", e)
