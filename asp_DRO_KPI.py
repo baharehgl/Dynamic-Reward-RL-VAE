@@ -6,11 +6,22 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # For non-interactive plotting
 import matplotlib.pyplot as plt
 from scipy import stats
 import tensorflow as tf
 
+# ---------------------
+# Force TensorFlow to use GPU if available.
+# - allow_soft_placement=True  => if the GPU version of an op isn't available, place on CPU.
+# - allow_growth=True          => let TensorFlow grow GPU memory usage as needed
+config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
+config.gpu_options.allow_growth = True
+
+# If you want to specify which GPU, uncomment:
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+# ---------------------
 # Disable Eager Execution => TF1.x style placeholders
 tf.compat.v1.disable_eager_execution()
 
@@ -24,7 +35,8 @@ from tensorflow.keras import layers, models, losses
 from collections import deque, namedtuple
 import glob
 
-# Import environment
+# ---------------------
+# Import custom environment
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_dir = os.path.join(current_dir, 'environment')
 sys.path.append(env_dir)
@@ -229,6 +241,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
+# -------------- Q-Estimator --------------
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.001), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -254,7 +267,7 @@ class Q_Estimator_Nonlinear():
             self.loss   = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
-            self.global_step = tf.Variable(0, name="global_step", trainable=False)
+            self.global_step = tf.compat.v1.Variable(0, name="global_step", trainable=False)
             self.train_op    = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
             self.summaries = tf.compat.v1.summary.merge([
@@ -297,11 +310,9 @@ def copy_model_parameters(sess, estimator1, estimator2):
 
 def make_epsilon_greedy_policy(estimator, nA):
     def policy_fn(observation, epsilon, sess=None):
-        # If observation is empty => skip
         if observation.size == 0:
             return np.array([], dtype='float32')
-
-        obs_batch = np.expand_dims(observation, axis=0)  # shape => (1, n_steps, 1)
+        obs_batch = np.expand_dims(observation, axis=0)
         q_values = estimator.predict(obs_batch, sess=sess)[0]
         A = np.ones(nA, dtype='float32') * (epsilon / nA)
         best_action = np.argmax(q_values)
@@ -324,7 +335,7 @@ class active_learning(object):
         distances = []
         for state in states_list:
             if state.size == 0:
-                distances.append(9999999)  # skip empty states
+                distances.append(9999999)
                 continue
             st_reshaped = np.reshape(state, (n_steps, n_input_dim))
             q_vals = self.estimator.predict(np.expand_dims(st_reshaped, axis=0), sess=sess)[0]
@@ -350,7 +361,6 @@ class WarmUp(object):
         return clf
 
 def RNNBinaryStateFuc(timeseries, timeseries_curser):
-    # Typically not used if you rely on states_list, but kept here
     if timeseries_curser < n_steps:
         pad_length = n_steps - timeseries_curser
         front_pad  = np.zeros(pad_length)
@@ -407,7 +417,6 @@ def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=T
                 continue
             action = np.argmax(act_probs)
 
-            # Convert to df row
             df_row = env.timeseries_curser * env._stride
             if df_row >= len(env.timeseries):
                 break
@@ -493,7 +502,6 @@ def q_learning(env,
 
     data_train_flat = [np.ravel(s) for s in data_train]
     data_train_flat = np.array(data_train_flat)
-    from sklearn.ensemble import IsolationForest
     warm_model = IsolationForest(contamination=outliers_fraction, random_state=42)
     warm_model.fit(data_train_flat)
 
@@ -538,7 +546,6 @@ def q_learning(env,
 
         # Active Learning
         labeled_index = []
-        # We get row indices from environment => we have to map i->df_row if needed
         for row_i in range(len(env.timeseries)):
             if env.timeseries.at[row_i, 'label'] != -1:
                 labeled_index.append(row_i // env._stride)
@@ -548,7 +555,6 @@ def q_learning(env,
         al_samples = al.get_samples(sess=sess)
         print(f"Active learning picked samples: {al_samples}")
         for idx in al_samples:
-            # map to real DF row
             df_row = idx * env._stride
             if df_row < len(env.timeseries):
                 env.timeseries.at[df_row, 'label'] = env.timeseries.at[df_row, 'anomaly']
@@ -596,10 +602,9 @@ def q_learning(env,
                 if df_row < len(env.timeseries):
                     env.timeseries.at[df_row, 'label'] = pseudo_label
 
-        # Now do mini-epoch
+        # mini-epoch
         idx_list = list(range(len(env.states_list)))
         random.shuffle(idx_list)
-        # For each epoch_step
         for epoch_step in range(num_epoches):
             for i_idx in idx_list:
                 if i_idx < n_steps:
@@ -613,7 +618,6 @@ def q_learning(env,
                 epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
                 act_probs = policy(st, epsilon, sess=sess)
                 if act_probs.size == 0:
-                    # skip if policy returned empty
                     continue
                 action = np.argmax(act_probs)
 
@@ -713,11 +717,15 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     os.makedirs(exp_dir, exist_ok=True)
     tf.compat.v1.reset_default_graph()
 
+    # Create a session that uses the GPU if available
+    config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
+    config.gpu_options.allow_growth = True
+
     from tensorflow.compat.v1 import Session
     q_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=exp_dir, learning_rate=3e-4)
     target_estimator = Q_Estimator_Nonlinear(scope="target", learning_rate=3e-4)
 
-    sess = Session()
+    sess = Session(config=config)  # pass our GPU config here
     with sess.as_default():
         sess.run(tf.compat.v1.global_variables_initializer())
 
