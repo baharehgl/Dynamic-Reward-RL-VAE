@@ -6,22 +6,23 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')  # For non-interactive plotting
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import stats
+
 import tensorflow as tf
 
-# ---------------------
-# Force TensorFlow to use GPU if available.
-# - allow_soft_placement=True  => if the GPU version of an op isn't available, place on CPU.
-# - allow_growth=True          => let TensorFlow grow GPU memory usage as needed
-config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-config.gpu_options.allow_growth = True
+# -------------- GPU Configuration --------------
+# For TensorFlow 1.x style usage
+config = tf.compat.v1.ConfigProto()
+config.gpu_options.allow_growth = True  # Let GPU memory grow as needed
+session = tf.compat.v1.Session(config=config)
+tf.compat.v1.keras.backend.set_session(session)
 
-# If you want to specify which GPU, uncomment:
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# If you explicitly want to force ops on GPU (optional):
+# with tf.device('/GPU:0'):
+#     pass  # Place large computations under this block if you wish
 
-# ---------------------
 # Disable Eager Execution => TF1.x style placeholders
 tf.compat.v1.disable_eager_execution()
 
@@ -35,8 +36,9 @@ from tensorflow.keras import layers, models, losses
 from collections import deque, namedtuple
 import glob
 
-# ---------------------
-# Import custom environment
+# ---------------------------------------------------------------------
+#  Import environment (make sure time_series_repo_ext.py is accessible)
+# ---------------------------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_dir = os.path.join(current_dir, 'environment')
 sys.path.append(env_dir)
@@ -213,6 +215,7 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
     if timeseries_curser >= n_steps:
         window = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
         window = np.reshape(window, (1, n_steps))
+        # GPU usage will happen automatically if available and you installed TF with GPU support
         vae_reconstruction = vae.predict(window)
         reconstruction_error = np.mean(np.square(vae_reconstruction - window))
 
@@ -225,8 +228,10 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
 
         true_label = timeseries['anomaly'][timeseries_curser]
         if true_label == 0:
+            # normal
             return [tau * (1 + vae_penalty), tau * (-1 + vae_penalty)]
         else:
+            # anomaly
             return [tau * (-5 + vae_penalty), tau * (5 + vae_penalty)]
     else:
         return [0, 0]
@@ -241,7 +246,6 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     else:
         return [0, 0]
 
-# -------------- Q-Estimator --------------
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.001), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -267,7 +271,7 @@ class Q_Estimator_Nonlinear():
             self.loss   = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
-            self.global_step = tf.compat.v1.Variable(0, name="global_step", trainable=False)
+            self.global_step = tf.Variable(0, name="global_step", trainable=False)
             self.train_op    = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
             self.summaries = tf.compat.v1.summary.merge([
@@ -283,11 +287,13 @@ class Q_Estimator_Nonlinear():
                 self.summary_writer = tf.compat.v1.summary.FileWriter(summary_dir)
 
     def predict(self, state, sess=None):
-        sess = sess or tf.compat.v1.get_default_session()
+        if sess is None:
+            sess = tf.compat.v1.get_default_session()
         return sess.run(self.action_values, {self.state: state})
 
     def update(self, state, target, sess=None):
-        sess = sess or tf.compat.v1.get_default_session()
+        if sess is None:
+            sess = tf.compat.v1.get_default_session()
         feed_dict = {self.state: state, self.target: target}
         summaries, global_step, _, loss_val = sess.run(
             [self.summaries, self.global_step, self.train_op, self.loss],
@@ -312,7 +318,7 @@ def make_epsilon_greedy_policy(estimator, nA):
     def policy_fn(observation, epsilon, sess=None):
         if observation.size == 0:
             return np.array([], dtype='float32')
-        obs_batch = np.expand_dims(observation, axis=0)
+        obs_batch = np.expand_dims(observation, axis=0)  # shape => (1, n_steps, 1)
         q_values = estimator.predict(obs_batch, sess=sess)[0]
         A = np.ones(nA, dtype='float32') * (epsilon / nA)
         best_action = np.argmax(q_values)
@@ -345,6 +351,7 @@ class active_learning(object):
 
         distances = np.array(distances)
         rank_ind  = np.argsort(distances)
+        # Remove already selected
         rank_ind  = [i for i in rank_ind if i not in self.already_selected]
         active_samples = rank_ind[:self.N]
         return active_samples
@@ -361,13 +368,14 @@ class WarmUp(object):
         return clf
 
 def RNNBinaryStateFuc(timeseries, timeseries_curser):
+    # Typically not used if you rely on states_list, but kept here
     if timeseries_curser < n_steps:
         pad_length = n_steps - timeseries_curser
         front_pad  = np.zeros(pad_length)
         val_part   = timeseries['value'][:timeseries_curser].values
         state_1d   = np.concatenate([front_pad, val_part], axis=0)
     else:
-        state_1d   = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
+        state_1d = timeseries['value'][timeseries_curser - n_steps : timeseries_curser].values
     return np.reshape(state_1d, (n_steps, 1))
 
 def evaluate_model(y_true, y_pred):
@@ -377,7 +385,7 @@ def evaluate_model(y_true, y_pred):
     recall    = recall_score(y_true, y_pred, zero_division=1)
     f1        = f1_score(y_true, y_pred, zero_division=1)
     mcc       = matthews_corrcoef(y_true, y_pred)
-    balanced_acc = (recall + (tn/(tn+fp))) / 2 if (tn+fp)>0 else recall
+    balanced_acc = (recall + (tn/(tn+fp))) / 2 if (tn+fp) > 0 else recall
     fpr = fp / (fp + tn) if (fp + tn)>0 else 0
     fnr = fn / (fn + tp) if (fn + tp)>0 else 0
     return {
@@ -398,6 +406,7 @@ def q_learning_validator(env, estimator, num_episodes=1, record_dir=None, plot=T
     for i_episode in range(num_episodes):
         print(f"\nValidation Episode {i_episode+1}/{num_episodes}")
         env.reset()
+        # Skip the first portion for actual validation if you want => up to you
         while env.datasetidx < env.datasetrng * validation_separate_ratio:
             env.reset()
 
@@ -502,6 +511,7 @@ def q_learning(env,
 
     data_train_flat = [np.ravel(s) for s in data_train]
     data_train_flat = np.array(data_train_flat)
+    from sklearn.ensemble import IsolationForest
     warm_model = IsolationForest(contamination=outliers_fraction, random_state=42)
     warm_model.fit(data_train_flat)
 
@@ -564,7 +574,7 @@ def q_learning(env,
         y_list = []
         for i, st in enumerate(env.states_list):
             if st.size == 0:
-                X_list.append([9999999])  # skip
+                X_list.append([9999999])
                 y_list.append(-1)
                 continue
             df_row = i * env._stride
@@ -602,7 +612,7 @@ def q_learning(env,
                 if df_row < len(env.timeseries):
                     env.timeseries.at[df_row, 'label'] = pseudo_label
 
-        # mini-epoch
+        # Mini-epoch training
         idx_list = list(range(len(env.states_list)))
         random.shuffle(idx_list)
         for epoch_step in range(num_epoches):
@@ -685,8 +695,10 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     vae = build_vae(original_dim, latent_dim, intermediate_dim)
     print("\nTraining VAE on single points (original_dim=1) with MSE...")
 
-    # pass y=None => no separate target for add_loss
-    vae.fit(x_train, None, epochs=10, batch_size=32, validation_split=0.1)
+    # Use the GPU automatically if it's available
+    with session.as_default():
+        tf.compat.v1.keras.backend.set_session(session)
+        vae.fit(x_train, None, epochs=10, batch_size=32, validation_split=0.1)
 
     vae_save_path = os.path.join(current_dir, 'vae_model_kpi.h5')
     vae.save(vae_save_path)
@@ -717,16 +729,11 @@ def train(num_LP=20, num_AL=5, discount_factor=0.92, learn_tau=True):
     os.makedirs(exp_dir, exist_ok=True)
     tf.compat.v1.reset_default_graph()
 
-    # Create a session that uses the GPU if available
-    config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-    config.gpu_options.allow_growth = True
+    # Because we reset the graph above, re-create the estimators under the session's graph
+    with tf.compat.v1.Session(config=config) as sess:
+        q_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=exp_dir, learning_rate=3e-4)
+        target_estimator = Q_Estimator_Nonlinear(scope="target", learning_rate=3e-4)
 
-    from tensorflow.compat.v1 import Session
-    q_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=exp_dir, learning_rate=3e-4)
-    target_estimator = Q_Estimator_Nonlinear(scope="target", learning_rate=3e-4)
-
-    sess = Session(config=config)  # pass our GPU config here
-    with sess.as_default():
         sess.run(tf.compat.v1.global_variables_initializer())
 
         q_learning(env=env,
