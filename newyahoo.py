@@ -63,7 +63,7 @@ FN_Value = -5
 
 validation_separate_ratio = 0.9
 #n_steps = 25       # RNN sliding window
-n_steps = 10
+n_steps = 100
 n_input_dim = 2    # input dimension per step
 n_hidden_dim = 128 # hidden dimension for LSTM
 
