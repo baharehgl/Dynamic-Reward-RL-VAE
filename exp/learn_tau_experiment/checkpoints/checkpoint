@@ -1,0 +1,2 @@
+model_checkpoint_path: "C:\\Users\\robotics\\Documents\\GitHub\\Adaptive-Reward-Scaling-Reinforcement-Learning\\exp\\learn_tau_experiment\\checkpoints\\model.ckpt"
+all_model_checkpoint_paths: "C:\\Users\\robotics\\Documents\\GitHub\\Adaptive-Reward-Scaling-Reinforcement-Learning\\exp\\learn_tau_experiment\\checkpoints\\model.ckpt"

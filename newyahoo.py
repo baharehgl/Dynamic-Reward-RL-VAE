@@ -62,7 +62,8 @@ FP_Value = -1
 FN_Value = -5
 
 validation_separate_ratio = 0.9
-n_steps = 25       # RNN sliding window
+#n_steps = 25       # RNN sliding window
+n_steps = 10
 n_input_dim = 2    # input dimension per step
 n_hidden_dim = 128 # hidden dimension for LSTM
 
@@ -780,8 +781,8 @@ def plot_tau_evolution():
 if __name__ == "__main__":
     print("=== Starting Training with MSE-based VAE & GPU check ===")
     # Example usage
-    train(100, 30, discount_factor=0.92, learn_tau=True)
-    train(150, 50, discount_factor=0.94, learn_tau=True)
+    #train(100, 30, discount_factor=0.92, learn_tau=True)
+    #train(150, 50, discount_factor=0.94, learn_tau=True)
     train(200, 100, discount_factor=0.96, learn_tau=True)
 
     plot_tau_evolution()
