@@ -59,7 +59,8 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # size of the slide window for SLIDE_WINDOW state and reward functions
+n_steps = 50
+#n_steps = 25  # size of the slide window for SLIDE_WINDOW state and reward functions
 n_input_dim = 2  # dimension of the input for a LSTM cell
 n_hidden_dim = 128  # dimension of the hidden state in LSTM cell
 
