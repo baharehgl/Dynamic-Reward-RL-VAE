@@ -36,7 +36,7 @@ parent_dir = os.path.dirname(current_dir)
 # append the parent directory to the sys.path list
 sys.path.append(parent_dir)
 
-from environment.time_series_repo_ext import EnvTimeSeriesfromRepo
+from environment.time_series_repo import EnvTimeSeriesfromRepo
 # from ..environment.time_series_repo_ext import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 # from sklearn.semi_supervised import label_propagation
