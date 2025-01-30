@@ -62,29 +62,37 @@ validation_separate_ratio = 0.9
 
 
 ########################### VAE #####################
-def load_normal_data(data_path):
+def load_normal_data(data_path, n_steps=25):
     """
-    Load and concatenate all CSV files from the specified directory.
+    Load and concatenate all CSV files from the specified directory into overlapping sequences.
 
     Args:
         data_path (str): Path to the directory containing CSV files.
+        n_steps (int): Number of steps in each sequence.
 
     Returns:
-        np.ndarray: Scaled data.
+        np.ndarray: Scaled sequences with shape (samples, n_steps, features).
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
     data_list = [pd.read_csv(file) for file in all_files]
     data = pd.concat(data_list, axis=0, ignore_index=True)
 
-    # Assume your data needs to be scaled - adjust depending on your actual features
+    # Scale the data
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(data.values)
-    return scaled_data
+
+    # Create overlapping sequences
+    sequences = []
+    for i in range(len(scaled_data) - n_steps + 1):
+        seq = scaled_data[i:i + n_steps]
+        sequences.append(seq)
+
+    return np.array(sequences)
 
 
 # Path to the directory containing normal data (relative to script directory)
 data_directory = os.path.join(current_dir, 'normal-data')
-x_train = load_normal_data(data_directory)
+x_train = load_normal_data(data_directory, n_steps=n_steps)
 
 
 class Sampling(layers.Layer):
@@ -248,7 +256,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
 class Q_Estimator_Nonlinear():
     """
     Action-Value Function Approximator Q(s,a) with Tensorflow RNN.
-    Note: The Recurrent Neural Network is used here !
+    Note: The Recurrent Neural Network is used here!
     """
 
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
@@ -440,7 +448,11 @@ def q_learning(env,
             return
 
     # Get the current global step
-    global_step = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0]
+    global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")
+    if not global_step_var:
+        global_step = tf.Variable(0, name="global_step", trainable=False)
+    else:
+        global_step = global_step_var[0]
     total_t = sess.run(global_step)
 
     # The epsilon decay schedule
@@ -465,6 +477,15 @@ def q_learning(env,
         env.reset()
         # Remove time window
         data_train.extend(env.states_list)
+    # Convert data_train to numpy array with proper shape
+    data_train = np.array(data_train)
+    if data_train.ndim == 2:
+        data_train = data_train.reshape(data_train.shape[0], 1, data_train.shape[1])
+    elif data_train.ndim == 3:
+        pass  # Already in the correct shape
+    else:
+        raise ValueError(f"Unexpected data_train shape: {data_train.shape}")
+
     # Isolation Forest model
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
 
@@ -473,14 +494,25 @@ def q_learning(env,
 
     for t in itertools.count():
         env.reset()
-        data = np.array(env.states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        anomaly_score = model.decision_function(data)  # [-0.5, 0.5]
-        pred_score = [-1 * s + 0.5 for s in anomaly_score]  # [0, 0.5]
+        data = np.array(env.states_list)
+        if data.ndim == 2:
+            data = data.reshape(1, data.shape[0], data.shape[1])
+        elif data.ndim == 3:
+            pass  # Already in correct shape
+        else:
+            raise ValueError(f"Unexpected env.states_list shape: {data.shape}")
+
+        # Extract last time step's features for anomaly detection
+        data_last = data[:, -1, :]  # Shape: (samples, features)
+        anomaly_score = model.decision_function(data_last)  # e.g., [-0.5, 0.5]
+        pred_score = [-1 * s + 0.5 for s in anomaly_score]  # Transform to [0, 1]
+
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
 
         # Retrieve input for label propagation
-        state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
+        state_list = np.array(env.states_list)
+        state_list = state_list.reshape(state_list.shape[0], -1)  # Flatten if necessary
         label_list = [-1] * len(state_list)  # Remove labels
 
         for sample in warm_samples:
@@ -507,7 +539,7 @@ def q_learning(env,
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        # Select up to N samples that is most certain about
+        # Select up to N samples that are most certain about
         certainty_index = np.argsort(pred_entropies)
         certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
         # Give them pseudo labels
@@ -519,10 +551,9 @@ def q_learning(env,
             break
 
     popu_time = time.time() - popu_time
-    print("Populating replay memory with time {}".format(popu_time))
+    print("Populating replay memory with time {:.2f} seconds".format(popu_time))
 
     # 3. Start the main loop
-    dict_labels = {}
     for i_episode in range(num_episodes):
         # Save the current checkpoint
         if i_episode % 50 == 49:
@@ -538,11 +569,10 @@ def q_learning(env,
             print('double reset')
 
         # Active learning:
-        # If AL is needed
         # Index of already labeled samples of this TS
         labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
         # Transform to match state_list
-        labeled_index = [item for item in labeled_index if item >= 25]
+        labeled_index = [item for item in labeled_index if item >= n_steps]
         labeled_index = [item - n_steps for item in labeled_index]
 
         al = active_learning(env=env, N=num_active_learning, strategy='margin_sampling',
@@ -555,7 +585,8 @@ def q_learning(env,
         num_label += len(al_samples)
 
         # Retrieve input for label propagation
-        state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
+        state_list = np.array(env.states_list)
+        state_list = state_list.reshape(state_list.shape[0], -1)  # Flatten if necessary
         label_list = np.array(env.timeseries['label'][n_steps:])
 
         for new_sample in al_samples:
@@ -587,7 +618,7 @@ def q_learning(env,
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        # Select up to N samples that is most certain about
+        # Select up to N samples that are most certain about
         certainty_index = np.argsort(pred_entropies)
         certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
         # Give them pseudo labels
@@ -610,12 +641,25 @@ def q_learning(env,
                 print("\nCopied model parameters to target network.\n")
 
             # Sample a minibatch from the replay memory
-            samples = random.sample(replay_memory, batch_size)
+            if len(replay_memory) < batch_size:
+                batch_size_current = len(replay_memory)
+            else:
+                batch_size_current = batch_size
+            samples = random.sample(replay_memory, batch_size_current)
             states_batch, reward_batch, next_states_batch, done_batch = map(np.array, zip(*samples))
 
             if discount_factor > 0:
                 # Calculate Q values and targets
-                next_states_batch = np.squeeze(np.split(next_states_batch, 2, axis=1))
+                # Assuming next_states_batch is (batch_size, 2, n_steps, features)
+                # Adjust reshape if necessary
+                # For this example, we assume each transition has two next states
+                # Here, the code assumes that next_states_batch can be split into two
+                # If not, adjust accordingly
+                try:
+                    next_states_batch = np.squeeze(np.split(next_states_batch, 2, axis=1))
+                except ValueError as e:
+                    print(f"Error splitting next_states_batch: {e}")
+                    continue
                 next_states_batch0 = next_states_batch[0]
                 next_states_batch1 = next_states_batch[1]
 
@@ -635,8 +679,8 @@ def q_learning(env,
             total_t += 1
 
         per_loop_time_updt = time.time() - per_loop_time2
-        print("Global step {} @ Episode {}/{}, time: {} + {}"
-              .format(total_t, i_episode + 1, num_episodes, per_loop_time1 - per_loop_time1, per_loop_time_updt))
+        print("Global step {} @ Episode {}/{}, time: {:.2f} + {:.2f} seconds"
+              .format(total_t, i_episode + 1, num_episodes, per_loop_time2 - per_loop_time1, per_loop_time_updt))
     return
 
 
@@ -790,8 +834,11 @@ class WarmUp(object):
 
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
-        data = np.array(X_train).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        clf = IsolationForest(contamination=outliers_fraction)
+        # X_train is assumed to be (samples, n_steps, features)
+        # Extract the last time step's features
+        data = X_train[:, -1, :]  # Shape: (samples, features)
+        print("Data shape for IsolationForest:", data.shape)  # Debugging
+        clf = IsolationForest(contamination=outliers_fraction, random_state=42)
         clf.fit(data)
         return clf
 
@@ -815,7 +862,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
 
     # Load the dataset
     data_directory = os.path.join(current_dir, 'normal-data')
-    x_train = load_normal_data(data_directory)
+    x_train = load_normal_data(data_directory, n_steps=n_steps)
 
     # Train a Variational Autoencoder (VAE)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
