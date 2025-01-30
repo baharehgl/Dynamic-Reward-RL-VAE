@@ -62,7 +62,7 @@ validation_separate_ratio = 0.9
 
 
 ########################### VAE #####################
-def load_normal_data(data_path, n_steps=25):
+def load_normal_data(data_path, n_steps=50):
     """
     Load and concatenate all CSV files from the specified directory into overlapping sequences.
 
