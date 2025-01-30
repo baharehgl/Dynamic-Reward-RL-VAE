@@ -805,7 +805,7 @@ def plot_tau_evolution():
 ##############################################################################
 
 if __name__ == "__main__":
-    
+
     train(100, 30, 0.92, learn_tau=True)
     train(150, 50, 0.94, learn_tau=True)
     train(200, 100, 0.96, learn_tau=True)
