@@ -17,11 +17,9 @@ from mpl_toolkits.mplot3d import axes3d
 from collections import deque, namedtuple
 from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
-from tensorflow.keras.layers import LSTMCell, RNN  # Updated imports
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
-from sklearn.semi_supervised import LabelPropagation
-from sklearn.semi_supervised import LabelSpreading
+from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 
 # Disable eager execution for TensorFlow 1.x compatibility
 tf.compat.v1.disable_eager_execution()
@@ -66,7 +64,6 @@ FN_Value = -5
 
 validation_separate_ratio = 0.9  # Ratio to separate validation data
 
-
 # ========================== VAE Setup ================================
 def load_normal_data(data_path, n_steps=50):
     """
@@ -95,7 +92,6 @@ def load_normal_data(data_path, n_steps=50):
 
     return np.array(sequences)
 
-
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the vector encoding."""
 
@@ -103,9 +99,8 @@ class Sampling(layers.Layer):
         z_mean, z_log_var = inputs
         batch = tf.shape(z_mean)[0]
         dim = tf.shape(z_mean)[1]
-        epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
+        epsilon = tf.random.normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
-
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     """
@@ -145,37 +140,137 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer='adam')
     return vae, encoder
 
-
 # Constants for VAE
 original_dim = 3  # Depends on the dimension of your input data
 latent_dim = 10
 intermediate_dim = 64
 
-# Load normal data
-data_directory = os.path.join(current_dir, 'normal-data')
-x_train_sequences = load_normal_data(data_directory, n_steps=n_steps)
+# ========================== Q-Learning Components =========================
+class Q_Estimator_Nonlinear():
+    """
+    Action-Value Function Approximator Q(s,a) with TensorFlow RNN.
+    Uses TensorFlow's native LSTMCell and dynamic_rnn for better compatibility.
+    """
 
-# Modify the training data to include only the last time step from each sequence
-x_train = x_train_sequences[:, -1, :]  # Shape: (samples, 3)
+    def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
+        self.scope = scope
+        self.summary_writer = None
 
-# ========================== VAE Training ================================
-# Train the VAE on single time steps
-vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
-vae.fit(x_train, epochs=50, batch_size=32)
-vae_save_path = os.path.join(current_dir, 'vae_model.h5')
-vae.save(vae_save_path)
+        with tf.compat.v1.variable_scope(scope):
+            # TensorFlow Graph inputs
+            self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
+                                                 dtype=tf.float32, name="state")
+            self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
+                                                  dtype=tf.float32, name="target")
 
-# Load pretrained VAE for inference
-vae = load_model(vae_save_path, custom_objects={'Sampling': Sampling}, compile=False)
+            # Define weights and biases for output layer
+            self.weights = {
+                'out': tf.Variable(tf.compat.v1.random_normal([n_hidden_dim, action_space_n]))
+            }
+            self.biases = {
+                'out': tf.Variable(tf.compat.v1.random_normal([action_space_n]))
+            }
 
+            # Define an LSTM cell using TensorFlow's native API
+            lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim, forget_bias=1.0)
 
-# ========================== Reward Function with APS ==========================
+            # Use dynamic_rnn for processing the input sequences
+            outputs, states = tf.compat.v1.nn.dynamic_rnn(lstm_cell, self.state,
+                                                          dtype=tf.float32)
+
+            # Extract the last output for each sequence
+            last_output = outputs[:, -1, :]  # Shape: [batch_size, n_hidden_dim]
+
+            # Compute action values
+            self.action_values = tf.matmul(last_output, self.weights['out']) + self.biases['out']
+
+            # Define the loss and optimizer
+            self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
+            self.loss = tf.reduce_mean(self.losses)
+
+            self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
+            self.train_op = self.optimizer.minimize(self.loss,
+                                                    global_step=tf.compat.v1.train.get_or_create_global_step())
+
+            # Summaries for TensorBoard
+            self.summaries = tf.compat.v1.summary.merge([
+                tf.compat.v1.summary.histogram("loss_hist", self.losses),
+                tf.compat.v1.summary.scalar("loss", self.loss),
+                tf.compat.v1.summary.histogram("q_values_hist", self.action_values),
+                tf.compat.v1.summary.scalar("q_value", tf.reduce_max(self.action_values))
+            ])
+
+            if summaries_dir:
+                summary_dir = os.path.join(summaries_dir, "summaries_{}".format(scope))
+                if not os.path.exists(summary_dir):
+                    os.makedirs(summary_dir)
+                self.summary_writer = tf.compat.v1.summary.FileWriter(summary_dir)
+
+    def predict(self, state, sess=None):
+        """Predict Q-values for given states."""
+        sess = sess or tf.compat.v1.get_default_session()
+        return sess.run(self.action_values, {self.state: state})
+
+    def update(self, state, target, sess=None):
+        """Update the Q-network based on states and target Q-values."""
+        sess = sess or tf.compat.v1.get_default_session()
+        feed_dict = {self.state: state, self.target: target}
+        summaries, global_step, _ = sess.run([self.summaries,
+                                              tf.compat.v1.train.get_or_create_global_step(),
+                                              self.train_op], feed_dict)
+        if self.summary_writer:
+            self.summary_writer.add_summary(summaries, global_step)
+        return
+
+def copy_model_parameters(sess, estimator1, estimator2):
+    """
+    Copies the model parameters of one estimator to another.
+
+    Args:
+      sess: TensorFlow session instance
+      estimator1: Estimator to copy the parameters from
+      estimator2: Estimator to copy the parameters to
+    """
+    e1_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator1.scope)]
+    e1_params = sorted(e1_params, key=lambda v: v.name)
+    e2_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator2.scope)]
+    e2_params = sorted(e2_params, key=lambda v: v.name)
+
+    update_ops = []
+    for e1_v, e2_v in zip(e1_params, e2_params):
+        op = e2_v.assign(e1_v)
+        update_ops.append(op)
+
+    sess.run(update_ops)
+
+def make_epsilon_greedy_policy(estimator, nA):
+    """
+    Creates an epsilon-greedy policy based on a given Q-function approximator and epsilon.
+
+    Args:
+        estimator: An estimator that returns Q values for a given state
+        nA: Number of actions in the environment.
+
+    Returns:
+        A function that takes the observation and epsilon as arguments and returns
+        the probabilities for each action in the form of a numpy array of length nA.
+    """
+
+    def policy_fn(observation, epsilon):
+        A = np.ones(nA, dtype='float32') * epsilon / nA
+        q_values = estimator.predict(state=[observation])
+        best_action = np.argmax(q_values)
+        A[best_action] += (1.0 - epsilon)
+        return A
+
+    return policy_fn
+
+# ========================== Reward Functions ==========================
 def kl_divergence(p, q):
     """Compute the KL divergence KL(p || q)."""
     p = np.clip(p, 1e-10, 1)
     q = np.clip(q, 1e-10, 1)
     return np.sum(p * np.log(p / q))
-
 
 def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, rho=0.5, max_iter=10):
     """
@@ -202,7 +297,7 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
 
         # Hessian (second derivative)
         hess = (preference_strength ** 2) * np.exp(-preference_strength / tau) / (
-                tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2
+            tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2
         )
 
         # Newton's update step for tau
@@ -213,10 +308,8 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
 
     return tau
 
-
 # List to store tau values for visualization
 tau_values = []
-
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     """
@@ -268,7 +361,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
     else:
         return [0, 0]  # No reward for initial steps
 
-
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     """
     Reward function for testing without APS.
@@ -288,7 +380,6 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
             return [FN_Value, TP_Value]
     else:
         return [0, 0]
-
 
 # ========================== State Function ================================
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
@@ -321,150 +412,52 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
                                  [[timeseries['value'][timeseries_curser], 1]]))
         return np.array([state0, state1], dtype='float32')
 
-
-# ========================== Q-Learning Components =========================
-class Q_Estimator_Nonlinear():
+# ========================== Warm-Up Strategies ============================
+class WarmUp(object):
     """
-    Action-Value Function Approximator Q(s,a) with TensorFlow RNN.
-    Note: The Recurrent Neural Network is used here!
+    Warm-up strategies for initializing replay memory.
     """
 
-    def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
-        self.scope = scope
-        self.summary_writer = None
+    def warm_up_isolation_forest(self, outliers_fraction, X_train):
+        """
+        Initialize and train Isolation Forest for anomaly detection.
 
-        with tf.compat.v1.variable_scope(scope):
-            # TensorFlow Graph input
-            self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
-                                                  dtype=tf.float32, name="state")
-            self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
-                                                   dtype=tf.float32, name="target")
+        Args:
+            outliers_fraction (float): Proportion of outliers in the data.
+            X_train (np.ndarray): Training data.
 
-            # Define weights and biases for output layer
-            self.weights = {
-                'out': tf.Variable(tf.compat.v1.random_normal([n_hidden_dim, action_space_n]))
-            }
-            self.biases = {
-                'out': tf.Variable(tf.compat.v1.random_normal([action_space_n]))
-            }
-
-            # Unstack the state for RNN
-            self.state_unstack = tf.unstack(self.state, n_steps, 1)
-
-            # Define an LSTM cell with TensorFlow Keras
-            lstm_cell = LSTMCell(n_hidden_dim)
-
-            # Use Keras RNN layer instead of static_rnn
-            rnn_layer = RNN(lstm_cell, return_sequences=False, return_state=False)
-            self.outputs = rnn_layer(self.state_unstack)
-
-            # Linear activation, using RNN inner loop last output
-            self.action_values = tf.matmul(self.outputs, self.weights['out']) + self.biases['out']
-
-            # Loss and train operation
-            self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
-            self.loss = tf.reduce_mean(self.losses)
-
-            self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            self.train_op = self.optimizer.minimize(self.loss,
-                                                    global_step=tf.compat.v1.train.get_or_create_global_step())
-
-            # Summaries for TensorBoard
-            self.summaries = tf.compat.v1.summary.merge([
-                tf.compat.v1.summary.histogram("loss_hist", self.losses),
-                tf.compat.v1.summary.scalar("loss", self.loss),
-                tf.compat.v1.summary.histogram("q_values_hist", self.action_values),
-                tf.compat.v1.summary.scalar("q_value", tf.reduce_max(self.action_values))
-            ])
-
-            if summaries_dir:
-                summary_dir = os.path.join(summaries_dir, "summaries_{}".format(scope))
-                if not os.path.exists(summary_dir):
-                    os.makedirs(summary_dir)
-                self.summary_writer = tf.compat.v1.summary.FileWriter(summary_dir)
-
-    def predict(self, state, sess=None):
-        """Predict Q-values for given states."""
-        sess = sess or tf.compat.v1.get_default_session()
-        return sess.run(self.action_values, {self.state: state})
-
-    def update(self, state, target, sess=None):
-        """Update the Q-network based on states and target Q-values."""
-        sess = sess or tf.compat.v1.get_default_session()
-        feed_dict = {self.state: state, self.target: target}
-        summaries, global_step, _ = sess.run([self.summaries,
-                                              tf.compat.v1.train.get_or_create_global_step(),
-                                              self.train_op], feed_dict)
-        if self.summary_writer:
-            self.summary_writer.add_summary(summaries, global_step)
-        return
-
-
-def copy_model_parameters(sess, estimator1, estimator2):
-    """
-    Copies the model parameters of one estimator to another.
-
-    Args:
-      sess: TensorFlow session instance
-      estimator1: Estimator to copy the parameters from
-      estimator2: Estimator to copy the parameters to
-    """
-    e1_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator1.scope)]
-    e1_params = sorted(e1_params, key=lambda v: v.name)
-    e2_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator2.scope)]
-    e2_params = sorted(e2_params, key=lambda v: v.name)
-
-    update_ops = []
-    for e1_v, e2_v in zip(e1_params, e2_params):
-        op = e2_v.assign(e1_v)
-        update_ops.append(op)
-
-    sess.run(update_ops)
-
-
-def make_epsilon_greedy_policy(estimator, nA):
-    """
-    Creates an epsilon-greedy policy based on a given Q-function approximator and epsilon.
-
-    Args:
-        estimator: An estimator that returns Q values for a given state
-        nA: Number of actions in the environment.
-
-    Returns:
-        A function that takes the observation and epsilon as arguments and returns
-        the probabilities for each action in the form of a numpy array of length nA.
-    """
-
-    def policy_fn(observation, epsilon):
-        A = np.ones(nA, dtype='float32') * epsilon / nA
-        q_values = estimator.predict(state=[observation])
-        best_action = np.argmax(q_values)
-        A[best_action] += (1.0 - epsilon)
-        return A
-
-    return policy_fn
-
+        Returns:
+            IsolationForest: Trained Isolation Forest model.
+        """
+        from sklearn.ensemble import IsolationForest
+        # X_train is assumed to be (samples, n_steps, features)
+        # Extract the last time step's features
+        data = X_train[:, -1, :]  # Shape: (samples, features)
+        print("Data shape for IsolationForest:", data.shape)  # Debugging
+        clf = IsolationForest(contamination=outliers_fraction, random_state=42)
+        clf.fit(data)
+        return clf
 
 # ========================== Q-Learning Algorithm ==========================
 def q_learning(env,
-               sess,
-               qlearn_estimator,
-               target_estimator,
-               num_episodes,
-               num_epoches,
-               replay_memory_size=500000,
-               replay_memory_init_size=50000,
-               experiment_dir='./log/',
-               update_target_estimator_every=10000,
-               discount_factor=0.99,
-               epsilon_start=1.0,
-               epsilon_end=0.1,
-               epsilon_decay_steps=500000,
-               batch_size=512,
-               num_LabelPropagation=20,
-               num_active_learning=5,
-               test=0,
-               vae_model=None):
+              sess,
+              qlearn_estimator,
+              target_estimator,
+              num_episodes,
+              num_epoches,
+              replay_memory_size=500000,
+              replay_memory_init_size=50000,
+              experiment_dir='./log/',
+              update_target_estimator_every=10000,
+              discount_factor=0.99,
+              epsilon_start=1.0,
+              epsilon_end=0.1,
+              epsilon_decay_steps=500000,
+              batch_size=512,
+              num_LabelPropagation=20,
+              num_active_learning=5,
+              test=0,
+              vae_model=None):
     """
     Q-Learning algorithm for off-policy TD control using Function Approximation.
     Finds the optimal greedy policy while following an epsilon-greedy policy.
@@ -529,8 +522,9 @@ def q_learning(env,
     )
 
     num_label = 0  # Counter for labeled samples
+    total_t = 0  # Total training steps
 
-    # 2. Populate the replay memory with initial experience by SVM
+    # 2. Populate the replay memory with initial experience by Isolation Forest
     popu_time = time.time()
 
     # Warm up with active learning
@@ -627,7 +621,7 @@ def q_learning(env,
         # Save the current checkpoint periodically
         if i_episode % 50 == 49:
             print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
-            saver.save(tf.compat.v1.get_default_session(), checkpoint_path)
+            saver.save(sess, checkpoint_path)
 
         per_loop_time1 = time.time()
 
@@ -753,7 +747,6 @@ def q_learning(env,
               .format(total_t, i_episode + 1, num_episodes, per_loop_time2 - per_loop_time1, per_loop_time_updt))
     return
 
-
 # ========================== Evaluation Metrics ============================
 def evaluate_model(y_true, y_pred):
     """
@@ -789,7 +782,6 @@ def evaluate_model(y_true, y_pred):
         "FPR": fpr,
         "FNR": fnr
     }
-
 
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     """
@@ -838,7 +830,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
         print(f"{metric}: {value:.4f}")
 
     return results
-
 
 # ========================== Active Learning ===============================
 class active_learning(object):
@@ -918,33 +909,19 @@ class active_learning(object):
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = label
         return
 
-
-# ========================== Warm-Up Strategies ============================
-class WarmUp(object):
+# ========================== Visualization Function =========================
+def plot_tau_evolution():
     """
-    Warm-up strategies for initializing replay memory.
+    Plot the evolution of tau during training.
     """
-
-    def warm_up_isolation_forest(self, outliers_fraction, X_train):
-        """
-        Initialize and train Isolation Forest for anomaly detection.
-
-        Args:
-            outliers_fraction (float): Proportion of outliers in the data.
-            X_train (np.ndarray): Training data.
-
-        Returns:
-            IsolationForest: Trained Isolation Forest model.
-        """
-        from sklearn.ensemble import IsolationForest
-        # X_train is assumed to be (samples, n_steps, features)
-        # Extract the last time step's features
-        data = X_train[:, -1, :]  # Shape: (samples, features)
-        print("Data shape for IsolationForest:", data.shape)  # Debugging
-        clf = IsolationForest(contamination=outliers_fraction, random_state=42)
-        clf.fit(data)
-        return clf
-
+    plt.figure(figsize=(10, 5))
+    plt.plot(tau_values, label="Tau over time", alpha=0.8)
+    plt.xlabel("Training Steps")
+    plt.ylabel("Tau Value")
+    plt.title("Evolution of Tau during Training")
+    plt.legend()
+    plt.savefig(os.path.join(current_dir, 'tau_evolution.png'))  # Save the plot
+    plt.close()  # Close the figure to free memory
 
 # ========================== Training Function =============================
 def train(num_LP, num_AL, discount_factor, learn_tau=True):
@@ -960,10 +937,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
     Returns:
         dict: Optimization metrics (e.g., F1-score).
     """
-    original_dim = 3  # Number of features in data
-    latent_dim = 10
-    intermediate_dim = 64
-
+    # VAE Training is handled outside this function
     # Load the dataset
     data_directory = os.path.join(current_dir, 'normal-data')
     x_train_sequences = load_normal_data(data_directory, n_steps=n_steps)
@@ -1009,6 +983,8 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
         # Reset TensorFlow graph and initialize global step
         tf.compat.v1.reset_default_graph()
         global_step = tf.compat.v1.train.get_or_create_global_step()
+
+        # Initialize TensorFlow session
         sess = tf.compat.v1.Session()
         sess.run(tf.compat.v1.global_variables_initializer())
         sess.run(global_step.assign(0))  # Initialize global_step to 0
@@ -1023,7 +999,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
                        sess=sess,
                        qlearn_estimator=qlearn_estimator,
                        target_estimator=target_estimator,
-                       num_episodes=300,
+                       num_episodes=EPISODES,
                        num_epoches=10,
                        experiment_dir=experiment_dir,
                        replay_memory_size=500000,
@@ -1044,22 +1020,6 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
                                                        int(env.datasetsize * (1 - validation_separate_ratio)),
                                                        experiment_dir)
         return optimization_metric
-
-
-# ========================== Visualization Function =========================
-def plot_tau_evolution():
-    """
-    Plot the evolution of tau during training.
-    """
-    plt.figure(figsize=(10, 5))
-    plt.plot(tau_values, label="Tau over time", alpha=0.8)
-    plt.xlabel("Training Steps")
-    plt.ylabel("Tau Value")
-    plt.title("Evolution of Tau during Training")
-    plt.legend()
-    plt.savefig(os.path.join(current_dir, 'tau_evolution.png'))  # Save the plot
-    plt.close()  # Close the figure to free memory
-
 
 # ========================== Main Execution ================================
 if __name__ == "__main__":
