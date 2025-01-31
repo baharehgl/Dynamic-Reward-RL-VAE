@@ -166,6 +166,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
     vae.add_loss(vae_loss)
     vae.compile(optimizer='adam')
+    print("VAE model built and compiled.")
     return vae, encoder
 
 
@@ -234,7 +235,11 @@ class Q_Estimator_Nonlinear():
                 summary_dir = os.path.join(summaries_dir, "summaries_{}".format(scope))
                 if not os.path.exists(summary_dir):
                     os.makedirs(summary_dir)
+                    print(f"Created summary directory at {summary_dir}")
                 self.summary_writer = tf.compat.v1.summary.FileWriter(summary_dir)
+                print(f"Summary writer initialized at {summary_dir}")
+
+        print(f"Q_Estimator_Nonlinear '{scope}' initialized.")
 
     def predict(self, state, sess=None):
         """Predict Q-values for given states."""
@@ -273,6 +278,7 @@ def copy_model_parameters(sess, estimator1, estimator2):
         update_ops.append(op)
 
     sess.run(update_ops)
+    print(f"Copied parameters from '{estimator1.scope}' to '{estimator2.scope}'.")
 
 
 def make_epsilon_greedy_policy(estimator, nA):
@@ -478,6 +484,7 @@ class WarmUp(object):
         print(f"Data shape for IsolationForest: {data.shape}")  # Debugging
         clf = IsolationForest(contamination=outliers_fraction, random_state=42)
         clf.fit(data)
+        print("Isolation Forest trained.")
         return clf
 
 
@@ -552,11 +559,15 @@ def q_learning(env,
         print("Loading model checkpoint {}...\n".format(latest_checkpoint))
         saver.restore(sess, latest_checkpoint)
         if test:
+            print("Test flag is set. Exiting after loading checkpoint.")
             return
+    else:
+        print("No checkpoint found. Starting fresh training.")
 
     # Get the current global step
     global_step = tf.compat.v1.train.get_or_create_global_step()
     sess.run(global_step.assign(0))  # Initialize global_step to 0
+    print("Global step initialized to 0.")
 
     # Epsilon decay schedule
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
@@ -580,9 +591,9 @@ def q_learning(env,
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
-        print(f"Resetting environment {num + 1}/{env.datasetsize}")
-        if not hasattr(env, 'states_list') or not env.states_list:
-            print(f"Warning: env.states_list is empty after reset {num + 1}")
+        print(f"After reset {num + 1}/{env.datasetsize}, states_list length: {len(env.states_list)}")
+        if not env.states_list:
+            print(f"Warning: states_list is empty after reset {num + 1}")
         else:
             data_train.extend(env.states_list)
 
@@ -604,9 +615,11 @@ def q_learning(env,
 
     # Initialize Isolation Forest model
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
+    print("Isolation Forest model trained.")
 
     # Initialize Label Propagation model
     lp_model = LabelSpreading()
+    print("Label Spreading model initialized.")
 
     for t in itertools.count():
         env.reset()
@@ -626,8 +639,10 @@ def q_learning(env,
         data_last = data[:, -1, :]  # Shape: (samples, features)
         print(f"Data for IsolationForest decision_function: {data_last.shape}")
         anomaly_score = model.decision_function(data_last)  # e.g., [-0.5, 0.5]
+        print(f"Anomaly scores: {anomaly_score}")
+
         pred_score = [-1 * s + 0.5 for s in anomaly_score]  # Transform to [0, 1]
-        print(f"Anomaly scores: {pred_score}")
+        print(f"Transformed anomaly scores (pred_score): {pred_score}")
 
         # Select top and bottom samples based on anomaly scores
         warm_samples = np.argsort(pred_score)[:5]
@@ -640,6 +655,9 @@ def q_learning(env,
         label_list = [-1] * len(state_list)  # Remove labels initially
 
         for sample in warm_samples:
+            if sample >= len(env.states_list):
+                print(f"Sample index {sample} out of bounds. Skipping.")
+                continue
             # Pick a state from warm_up samples
             state = env.states_list[sample]
             # Update the cursor
@@ -649,13 +667,13 @@ def q_learning(env,
             print(f"Selected action {action} for sample {sample}")
 
             # Assign the true label to the current position
-            env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
+            true_label = env.timeseries['anomaly'][env.timeseries_curser]
+            env.timeseries['label'][env.timeseries_curser] = true_label
             num_label += 1
-            print(
-                f"Assigned true label {env.timeseries['label'][env.timeseries_curser]} to position {env.timeseries_curser}")
+            print(f"Assigned true label {true_label} to position {env.timeseries_curser}")
 
             # Retrieve label for propagation
-            label_list[sample] = int(env.timeseries['anomaly'][env.timeseries_curser])
+            label_list[sample] = int(true_label)
 
             # Take a step in the environment
             next_state, reward, done, _ = env.step(action)
@@ -663,12 +681,15 @@ def q_learning(env,
 
             # Add experience to replay memory
             replay_memory.append(Transition(state, reward, next_state, done))
+            print(f"Replay memory size: {len(replay_memory)}")
 
         # Label propagation main process:
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         print(f"Unlabeled indices before label propagation: {unlabeled_indices}")
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
+        print("Label Spreading model fitted.")
+
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         print(f"Predicted entropies: {pred_entropies}")
 
@@ -695,7 +716,7 @@ def q_learning(env,
     for i_episode in range(num_episodes):
         # Save the current checkpoint periodically
         if i_episode % 50 == 49:
-            print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
+            print(f"Save checkpoint in episode {i_episode + 1}/{num_episodes}")
             saver.save(sess, checkpoint_path)
             print(f"Checkpoint saved at {checkpoint_path}")
 
@@ -725,6 +746,7 @@ def q_learning(env,
         # Add the new labeled samples
         labeled_index.extend(al_samples)
         num_label += len(al_samples)
+        print(f"Total labeled samples: {num_label}")
 
         # Retrieve input for label propagation
         state_list = np.array(env.states_list)
@@ -769,6 +791,8 @@ def q_learning(env,
         print(f"Unlabeled indices before label propagation: {unlabeled_indices}")
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
+        print("Label Spreading model fitted.")
+
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         print(f"Predicted entropies: {pred_entropies}")
 
