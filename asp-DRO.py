@@ -277,6 +277,9 @@ def copy_model_parameters(sess, estimator1, estimator2):
     e2_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator2.scope)]
     e2_params = sorted(e2_params, key=lambda v: v.name)
 
+    if len(e1_params) != len(e2_params):
+        raise ValueError("Estimator1 and Estimator2 have different number of trainable variables.")
+
     update_ops = []
     for e1_v, e2_v in zip(e1_params, e2_params):
         op = e2_v.assign(e1_v)
@@ -374,8 +377,8 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
     """
     if timeseries_curser >= n_steps:
         # Extract the current time step for VAE reconstruction
-        current_time_step = timeseries['value'][timeseries_curser]
-        current_state = np.array([current_time_step])  # Shape: (1, 1)
+        current_time_step = timeseries['value'].values[timeseries_curser]
+        current_state = np.array([current_time_step]).reshape(1, -1)  # Shape: (1, 1)
 
         # Predict reconstruction
         vae_reconstruction = vae.predict(current_state)
@@ -392,7 +395,7 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
         tau_values.append(tau)  # Store tau for visualization
 
         # Retrieve the true label
-        true_label = timeseries['anomaly'][timeseries_curser]
+        true_label = timeseries['anomaly'].values[timeseries_curser]
 
         # Define rewards based on the true label and action
         if true_label == NOT_ANOMALY:
@@ -422,9 +425,9 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
         list: Reward values for actions [NOT_ANOMALY, ANOMALY].
     """
     if timeseries_curser >= n_steps:
-        if timeseries['anomaly'][timeseries_curser] == NOT_ANOMALY:
+        if timeseries['anomaly'].values[timeseries_curser] == NOT_ANOMALY:
             return [TN_Value, FP_Value]
-        elif timeseries['anomaly'][timeseries_curser] == ANOMALY:
+        elif timeseries['anomaly'].values[timeseries_curser] == ANOMALY:
             return [FN_Value, TP_Value]
     else:
         return [0, 0]

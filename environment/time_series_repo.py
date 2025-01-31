@@ -1,217 +1,184 @@
 # environment/time_series_repo.py
 
+import os
 import pandas as pd
 import numpy as np
-import os
-import sklearn.preprocessing
 
-# Action Definitions
-NOT_ANOMALY = 0
-ANOMALY = 1
 
-# Reward Values
-REWARD_CORRECT = 1
-REWARD_INCORRECT = -1
-
-action_space = [NOT_ANOMALY, ANOMALY]
-
-# Hyperparameters
-n_steps = 50  # Number of steps in each sequence
-
-def defaultStateFuc(timeseries, timeseries_curser, previous_state=None, action=None):
+class EnvTimeSeriesfromRepo:
     """
-    Generate the current state for the RL agent based on the time series.
-
-    Args:
-        timeseries (DataFrame): The time series data.
-        timeseries_curser (int): Current position in the time series.
-        previous_state (np.ndarray or None): Previous state (if any).
-        action (int or None): Previous action taken (if any).
-
-    Returns:
-        np.ndarray or None: Current state representation or None if insufficient data.
-    """
-    if timeseries_curser < n_steps:
-        return None  # Not enough data to form a state
-    elif timeseries_curser == n_steps:
-        # Initial state: first n_steps with action flags set to 0
-        state = []
-        for i in range(timeseries_curser):
-            state.append([timeseries['value'][i], 0])  # Action flag set to 0
-        state.pop(0)  # Remove the first element to maintain window size
-        state.append([timeseries['value'][timeseries_curser], 1])  # Latest data point with action flag
-        return np.array(state, dtype='float32')
-    else:
-        # Generate two possible next states based on the current action
-        if previous_state is None:
-            return None
-        # Action 0: NOT_ANOMALY
-        state0 = np.concatenate((previous_state[1:n_steps],
-                                 [[timeseries['value'][timeseries_curser], 0]]))
-        # Action 1: ANOMALY
-        state1 = np.concatenate((previous_state[1:n_steps],
-                                 [[timeseries['value'][timeseries_curser], 1]]))
-        return np.array([state0, state1], dtype='float32')
-
-def defaultRewardFuc(timeseries, timeseries_curser, action):
-    """
-    Compute the reward based on the action taken.
-
-    Args:
-        timeseries (DataFrame): The time series data.
-        timeseries_curser (int): Current position in the time series.
-        action (int): Action taken (0 or 1).
-
-    Returns:
-        int: Reward value.
-    """
-    if action == timeseries['anomaly'][timeseries_curser]:
-        return REWARD_CORRECT
-    else:
-        return REWARD_INCORRECT
-
-class EnvTimeSeriesfromRepo():
-    """
-    Environment class for Time Series Anomaly Detection using Reinforcement Learning.
+    Custom Environment for Time Series Data from Repository.
     """
 
-    def __init__(self, repodir='normal-data/', n_steps=50):
+    def __init__(self, repodir, n_steps=50):
         """
-        Initialize the environment with the dataset directory and sequence length.
+        Initializes the environment by loading time series data from CSV files.
 
         Args:
-            repodir (str): Path to the dataset directory containing CSV files.
-            n_steps (int): Number of steps in each sequence.
+            repodir (str): Directory containing CSV files.
+            n_steps (int): Number of steps in each state.
         """
         self.repodir = repodir
-        self.repodirext = []
         self.n_steps = n_steps
-
-        # Traverse the repository directory to find all CSV files
-        for subdir, dirs, files in os.walk(self.repodir):
-            for file in files:
-                if file.endswith('.csv'):
-                    self.repodirext.append(os.path.join(subdir, file))
-
-        self.action_space_n = len(action_space)
-
+        self.datasets = self.load_datasets()
+        self.datasetsize = len(self.datasets)
+        self.dataset_idx = 0
         self.timeseries = None
-        self.timeseries_curser = -1
-        self.timeseries_curser_init = 0
-        self.timeseries_states = None
-
-        self.statefnc = defaultStateFuc
-        self.rewardfnc = defaultRewardFuc
-
-        self.timeseries_repo = []
         self.states_list = []
 
-        # Load datasets
-        for i, filepath in enumerate(self.repodirext):
+    def load_datasets(self):
+        """
+        Loads all CSV files from the repository directory.
+
+        Returns:
+            list of pd.DataFrame: List containing all loaded datasets.
+        """
+        if not os.path.exists(self.repodir):
+            raise FileNotFoundError(f"Repository directory {self.repodir} does not exist.")
+
+        all_files = [os.path.join(self.repodir, fname) for fname in os.listdir(self.repodir) if fname.endswith('.csv')]
+        if not all_files:
+            raise FileNotFoundError(f"No CSV files found in directory {self.repodir}.")
+
+        datasets = []
+        for file in all_files:
             try:
-                # Read CSV with specified columns
-                ts = pd.read_csv(filepath, usecols=[1, 2], header=0, names=['value', 'anomaly'])
-                # Add 'label' column initialized to -1
-                ts['label'] = -1
-                # Convert to float32
-                ts = ts.astype(np.float32)
-                # Scale 'value' column
-                scaler = sklearn.preprocessing.MinMaxScaler()
-                scaler.fit(ts['value'].values.reshape(-1, 1))
-                ts['value'] = scaler.transform(ts['value'].values.reshape(-1, 1))
-                # Check if dataset has enough rows
-                if ts.shape[0] < self.n_steps:
-                    print(f"Skipping {filepath}: Not enough rows ({ts.shape[0]}) for n_steps={self.n_steps}.")
+                df = pd.read_csv(file)
+                if 'value' not in df.columns or 'anomaly' not in df.columns:
+                    print(f"Skipping {file}: Missing 'value' or 'anomaly' columns.")
                     continue
-                # Append to repository
-                self.timeseries_repo.append(ts)
-                print(f"Loaded dataset {i+1}/{len(self.repodirext)}: {filepath} with {ts.shape[0]} rows.")
+                df = df[['value', 'anomaly']].dropna()
+                if df.shape[0] < self.n_steps:
+                    print(f"Skipping {file}: Less than {self.n_steps} rows after cleaning.")
+                    continue
+                datasets.append(df)
+                print(f"Loaded dataset {file} with {df.shape[0]} rows.")
             except Exception as e:
-                print(f"Error loading {filepath}: {e}")
+                print(f"Error loading {file}: {e}")
 
-        self.datasetsize = len(self.timeseries_repo)
-        print(f"Total valid datasets loaded: {self.datasetsize}")
+        if not datasets:
+            raise ValueError(
+                f"No valid datasets found in {self.repodir}. Ensure CSV files have 'value' and 'anomaly' columns with at least {self.n_steps} rows.")
 
-        if self.datasetsize == 0:
-            raise ValueError(f"No valid datasets found in directory {self.repodir}. Ensure CSV files have at least {self.n_steps} rows and contain 'value' and 'anomaly' columns.")
+        print(f"Total datasets loaded: {len(datasets)}")
+        return datasets
 
     def reset(self):
         """
-        Reset the environment to start a new episode.
+        Resets the environment to the initial state.
 
         Returns:
-            np.ndarray: The initial state.
+            np.ndarray: The first state.
         """
-        # Select a new dataset
-        if self.datasetsize == 0:
-            raise ValueError("No datasets loaded. Cannot reset environment.")
-        self.datasetidx = (self.datasetidx + 1) % self.datasetsize if hasattr(self, 'datasetidx') else 0
-        self.timeseries = self.timeseries_repo[self.datasetidx]
-        self.timeseries_curser = self.timeseries_curser_init
-
-        # Generate the initial state
-        self.timeseries_states = self.statefnc(self.timeseries, self.timeseries_curser)
-        print(f"Environment reset to dataset index {self.datasetidx}.")
-
-        # Update states list
+        self.dataset_idx = 0  # Reset to the first dataset
+        self.timeseries = self.load_timeseries(self.dataset_idx)
+        print(f"Environment reset to dataset index {self.dataset_idx}. Timeseries length: {len(self.timeseries)}")
         self.states_list = self.get_states_list()
+        return self.states_list[0] if self.states_list else None
 
-        return self.timeseries_states
+    def load_timeseries(self, idx):
+        """
+        Loads the time series data for the given dataset index.
+
+        Args:
+            idx (int): Index of the dataset to load.
+
+        Returns:
+            pd.DataFrame: The loaded time series data.
+        """
+        if idx < 0 or idx >= self.datasetsize:
+            raise IndexError(f"Dataset index {idx} out of range. Total datasets: {self.datasetsize}")
+        print(f"Loading dataset index {idx}")
+        return self.datasets[idx].reset_index(drop=True)
 
     def get_states_list(self):
         """
-        Process the entire time series into a list of states.
+        Generates a list of states from the timeseries data.
 
         Returns:
-            list: List of state sequences.
+            list of np.ndarray: List containing all generated states.
         """
         state_list = []
-        for cursor in range(self.timeseries_curser_init, self.timeseries['value'].size):
+        for cursor in range(len(self.timeseries)):
             if cursor < self.n_steps:
-                state = self.statefnc(self.timeseries, cursor)
-                if state is not None:
-                    state_list.append(state)
+                # Not enough data to form a state
+                continue
+            if not state_list:
+                # Initialize the first state without a previous state
+                state = self.statefnc(self.timeseries, cursor, previous_state=None, action=None)
+                print(f"Initializing first state at cursor {cursor}.")
             else:
-                state = self.statefnc(self.timeseries, cursor, state_list[-1], action=None)
-                if state is not None:
-                    # state is a numpy array with shape (2, n_steps, 2)
-                    # Each entry corresponds to action 0 and action 1
-                    # Append both possible states
-                    state_list.extend(state)
-        print(f"Generated {len(state_list)} states from dataset index {self.datasetidx}.")
+                # Use the last state in the list
+                state = self.statefnc(self.timeseries, cursor, previous_state=state_list[-1], action=None)
+            state_list.append(state)
+            print(f"State {len(state_list)} generated at cursor {cursor}.")
+        print(f"Total states generated: {len(state_list)}")
         return state_list
+
+    def statefnc(self, timeseries, cursor, previous_state=None, action=None):
+        """
+        Function to generate the next state based on the current action and previous state.
+
+        Args:
+            timeseries (pd.DataFrame): The time series data.
+            cursor (int): Current position in the time series.
+            previous_state (np.ndarray or None): The previous state.
+            action (int or None): The action taken.
+
+        Returns:
+            np.ndarray: The new state.
+        """
+        if previous_state is None:
+            # Initialize the state with the first n_steps data points
+            state = timeseries[['value', 'anomaly']].values[cursor - self.n_steps:cursor]
+            print(f"Created initial state with shape {state.shape}.")
+        else:
+            # Update the state based on the action
+            # For simplicity, assume state shifts and appends new data point
+            state = np.roll(previous_state, -1, axis=0)
+            state[-1] = timeseries[['value', 'anomaly']].values[cursor]
+            print(f"Updated state at cursor {cursor} with shape {state.shape}.")
+        return state
 
     def step(self, action):
         """
-        Take an action in the environment.
+        Applies the given action to the environment and returns the next state and reward.
 
         Args:
-            action (int): The action taken by the agent (0 or 1).
+            action (int): The action to take.
 
         Returns:
             tuple: (next_state, reward, done, info)
         """
-        # Get the reward
-        reward = self.rewardfnc(self.timeseries, self.timeseries_curser, action)
+        # Implement the environment's response to the action.
+        # This is a placeholder and should be replaced with actual logic.
+        # For example purposes, we'll assume a random next state and reward.
 
-        # Move to the next time step
-        self.timeseries_curser += 1
+        # Find the current state index based on states_list
+        # This requires tracking the current position in states_list
+        # For simplicity, let's assume that 'state_list' progresses linearly
 
-        # Check if we've reached the end of the time series
-        if self.timeseries_curser >= self.timeseries['value'].size:
+        # Placeholder implementation:
+        # Determine the index of the current state
+        current_state_index = self.states_list.index(self.current_state) if hasattr(self, 'current_state') else 0
+
+        if current_state_index + 1 >= len(self.states_list):
+            # Reached the end of the states_list
             done = True
             next_state = None
-            print("Reached the end of the time series.")
+            reward = 0
+            print("Reached the end of the states_list.")
         else:
+            # Move to the next state
+            next_state = self.states_list[current_state_index + 1]
+            self.current_state = next_state
             done = False
-            # Generate the next state based on the action
-            next_state = self.statefnc(self.timeseries, self.timeseries_curser, self.timeseries_states, action)
 
-            if next_state is not None:
-                if len(next_state.shape) > len(self.timeseries_states.shape):
-                    # Choose the state corresponding to the action
-                    self.timeseries_states = next_state[action]
-                else:
-                    self.timeseries_states = next_state
+            # Placeholder reward logic
+            # Replace this with your actual reward function
+            reward = 1 if action == 1 else 0  # Example: reward for taking action '1'
+
+            print(f"Took action {action}. Reward: {reward}. Next state index: {current_state_index + 1}")
 
         return next_state, reward, done, {}
+
