@@ -17,6 +17,7 @@ from mpl_toolkits.mplot3d import axes3d
 from collections import deque, namedtuple
 from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
+from tensorflow.keras.layers import LSTMCell, RNN  # Updated imports
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation
@@ -65,6 +66,7 @@ FN_Value = -5
 
 validation_separate_ratio = 0.9  # Ratio to separate validation data
 
+
 # ========================== VAE Setup ================================
 def load_normal_data(data_path, n_steps=50):
     """
@@ -93,6 +95,7 @@ def load_normal_data(data_path, n_steps=50):
 
     return np.array(sequences)
 
+
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the vector encoding."""
 
@@ -102,6 +105,7 @@ class Sampling(layers.Layer):
         dim = tf.shape(z_mean)[1]
         epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     """
@@ -141,6 +145,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer='adam')
     return vae, encoder
 
+
 # Constants for VAE
 original_dim = 3  # Depends on the dimension of your input data
 latent_dim = 10
@@ -157,13 +162,12 @@ x_train = x_train_sequences[:, -1, :]  # Shape: (samples, 3)
 # Train the VAE on single time steps
 vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 vae.fit(x_train, epochs=50, batch_size=32)
-
-# Save the trained VAE model
 vae_save_path = os.path.join(current_dir, 'vae_model.h5')
 vae.save(vae_save_path)
 
 # Load pretrained VAE for inference
 vae = load_model(vae_save_path, custom_objects={'Sampling': Sampling}, compile=False)
+
 
 # ========================== Reward Function with APS ==========================
 def kl_divergence(p, q):
@@ -171,6 +175,7 @@ def kl_divergence(p, q):
     p = np.clip(p, 1e-10, 1)
     q = np.clip(q, 1e-10, 1)
     return np.sum(p * np.log(p / q))
+
 
 def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, rho=0.5, max_iter=10):
     """
@@ -197,7 +202,7 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
 
         # Hessian (second derivative)
         hess = (preference_strength ** 2) * np.exp(-preference_strength / tau) / (
-            tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2
+                tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2
         )
 
         # Newton's update step for tau
@@ -208,8 +213,10 @@ def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, r
 
     return tau
 
+
 # List to store tau values for visualization
 tau_values = []
+
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     """
@@ -261,6 +268,7 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
     else:
         return [0, 0]  # No reward for initial steps
 
+
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     """
     Reward function for testing without APS.
@@ -280,6 +288,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
             return [FN_Value, TP_Value]
     else:
         return [0, 0]
+
 
 # ========================== State Function ================================
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
@@ -312,6 +321,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
                                  [[timeseries['value'][timeseries_curser], 1]]))
         return np.array([state0, state1], dtype='float32')
 
+
 # ========================== Q-Learning Components =========================
 class Q_Estimator_Nonlinear():
     """
@@ -326,9 +336,9 @@ class Q_Estimator_Nonlinear():
         with tf.compat.v1.variable_scope(scope):
             # TensorFlow Graph input
             self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
-                                                 dtype=tf.float32, name="state")
+                                                  dtype=tf.float32, name="state")
             self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
-                                                  dtype=tf.float32, name="target")
+                                                   dtype=tf.float32, name="target")
 
             # Define weights and biases for output layer
             self.weights = {
@@ -341,16 +351,15 @@ class Q_Estimator_Nonlinear():
             # Unstack the state for RNN
             self.state_unstack = tf.unstack(self.state, n_steps, 1)
 
-            # Define an LSTM cell with TensorFlow
-            lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim, forget_bias=1.0)
+            # Define an LSTM cell with TensorFlow Keras
+            lstm_cell = LSTMCell(n_hidden_dim)
 
-            # Get LSTM cell output
-            self.outputs, self.states = tf.compat.v1.nn.static_rnn(lstm_cell,
-                                                                    self.state_unstack,
-                                                                    dtype=tf.float32)
+            # Use Keras RNN layer instead of static_rnn
+            rnn_layer = RNN(lstm_cell, return_sequences=False, return_state=False)
+            self.outputs = rnn_layer(self.state_unstack)
 
             # Linear activation, using RNN inner loop last output
-            self.action_values = tf.matmul(self.outputs[-1], self.weights['out']) + self.biases['out']
+            self.action_values = tf.matmul(self.outputs, self.weights['out']) + self.biases['out']
 
             # Loss and train operation
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
@@ -390,6 +399,7 @@ class Q_Estimator_Nonlinear():
             self.summary_writer.add_summary(summaries, global_step)
         return
 
+
 def copy_model_parameters(sess, estimator1, estimator2):
     """
     Copies the model parameters of one estimator to another.
@@ -410,6 +420,7 @@ def copy_model_parameters(sess, estimator1, estimator2):
         update_ops.append(op)
 
     sess.run(update_ops)
+
 
 def make_epsilon_greedy_policy(estimator, nA):
     """
@@ -433,26 +444,27 @@ def make_epsilon_greedy_policy(estimator, nA):
 
     return policy_fn
 
+
 # ========================== Q-Learning Algorithm ==========================
 def q_learning(env,
-              sess,
-              qlearn_estimator,
-              target_estimator,
-              num_episodes,
-              num_epoches,
-              replay_memory_size=500000,
-              replay_memory_init_size=50000,
-              experiment_dir='./log/',
-              update_target_estimator_every=10000,
-              discount_factor=0.99,
-              epsilon_start=1.0,
-              epsilon_end=0.1,
-              epsilon_decay_steps=500000,
-              batch_size=512,
-              num_LabelPropagation=20,
-              num_active_learning=5,
-              test=0,
-              vae_model=None):
+               sess,
+               qlearn_estimator,
+               target_estimator,
+               num_episodes,
+               num_epoches,
+               replay_memory_size=500000,
+               replay_memory_init_size=50000,
+               experiment_dir='./log/',
+               update_target_estimator_every=10000,
+               discount_factor=0.99,
+               epsilon_start=1.0,
+               epsilon_end=0.1,
+               epsilon_decay_steps=500000,
+               batch_size=512,
+               num_LabelPropagation=20,
+               num_active_learning=5,
+               test=0,
+               vae_model=None):
     """
     Q-Learning algorithm for off-policy TD control using Function Approximation.
     Finds the optimal greedy policy while following an epsilon-greedy policy.
@@ -504,12 +516,8 @@ def q_learning(env,
             return
 
     # Get the current global step
-    global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")
-    if not global_step_var:
-        global_step = tf.Variable(0, name="global_step", trainable=False)
-    else:
-        global_step = global_step_var[0]
-    total_t = sess.run(global_step)
+    global_step = tf.compat.v1.train.get_or_create_global_step()
+    sess.run(global_step.assign(0))  # Initialize global_step to 0
 
     # Epsilon decay schedule
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
@@ -745,6 +753,7 @@ def q_learning(env,
               .format(total_t, i_episode + 1, num_episodes, per_loop_time2 - per_loop_time1, per_loop_time_updt))
     return
 
+
 # ========================== Evaluation Metrics ============================
 def evaluate_model(y_true, y_pred):
     """
@@ -780,6 +789,7 @@ def evaluate_model(y_true, y_pred):
         "FPR": fpr,
         "FNR": fnr
     }
+
 
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     """
@@ -828,6 +838,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
         print(f"{metric}: {value:.4f}")
 
     return results
+
 
 # ========================== Active Learning ===============================
 class active_learning(object):
@@ -907,6 +918,7 @@ class active_learning(object):
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = label
         return
 
+
 # ========================== Warm-Up Strategies ============================
 class WarmUp(object):
     """
@@ -932,6 +944,7 @@ class WarmUp(object):
         clf = IsolationForest(contamination=outliers_fraction, random_state=42)
         clf.fit(data)
         return clf
+
 
 # ========================== Training Function =============================
 def train(num_LP, num_AL, discount_factor, learn_tau=True):
@@ -995,15 +1008,14 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
 
         # Reset TensorFlow graph and initialize global step
         tf.compat.v1.reset_default_graph()
-        global_step = tf.Variable(0, name="global_step", trainable=False)
+        global_step = tf.compat.v1.train.get_or_create_global_step()
+        sess = tf.compat.v1.Session()
+        sess.run(tf.compat.v1.global_variables_initializer())
+        sess.run(global_step.assign(0))  # Initialize global_step to 0
 
         # Initialize Q-estimator and Target estimator
         qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
         target_estimator = Q_Estimator_Nonlinear(scope="target")
-
-        # Initialize TensorFlow session
-        sess = tf.compat.v1.Session()
-        sess.run(tf.compat.v1.global_variables_initializer())
 
         with sess.as_default():
             # Start Q-Learning
@@ -1033,6 +1045,7 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
                                                        experiment_dir)
         return optimization_metric
 
+
 # ========================== Visualization Function =========================
 def plot_tau_evolution():
     """
@@ -1046,6 +1059,7 @@ def plot_tau_evolution():
     plt.legend()
     plt.savefig(os.path.join(current_dir, 'tau_evolution.png'))  # Save the plot
     plt.close()  # Close the figure to free memory
+
 
 # ========================== Main Execution ================================
 if __name__ == "__main__":
