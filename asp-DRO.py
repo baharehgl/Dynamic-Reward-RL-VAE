@@ -683,3 +683,56 @@ def q_learning(env,
             print(f"Model checkpoint saved at episode {episode + 1}.")
 
     print("Training completed.")
+
+
+# ========================== Main Execution Block ==========================
+def main():
+    # Initialize the environment
+    dataset_directory = os.path.join(current_dir, 'normal-data')  # Adjust as needed
+    env = EnvTimeSeriesfromRepo(repodir=dataset_directory, n_steps=n_steps)
+    print("Environment initialized.")
+
+    # Build VAE model
+    original_dim = n_steps * n_input_dim  # Flatten the state
+    vae_model, encoder = build_vae(original_dim=original_dim, latent_dim=2, intermediate_dim=64)
+    print("VAE model initialized.")
+
+    # Start TensorFlow session
+    with tf.compat.v1.Session() as sess:
+        sess.run(tf.compat.v1.global_variables_initializer())
+        print("TensorFlow session started and variables initialized.")
+
+        # Initialize Q-Learning estimators
+        qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn_estimator",
+                                                 summaries_dir=os.path.join(current_dir, 'log'))
+        target_estimator = Q_Estimator_Nonlinear(scope="target_estimator",
+                                                 summaries_dir=os.path.join(current_dir, 'log'))
+
+        # Initialize target network parameters to match the Q-learning network
+        copy_model_parameters(sess, qlearn_estimator, target_estimator)
+        print("Target estimator initialized to match Q-learning estimator.")
+
+        # Start Q-Learning training
+        q_learning(env=env,
+                   sess=sess,
+                   qlearn_estimator=qlearn_estimator,
+                   target_estimator=target_estimator,
+                   vae_model=vae_model,
+                   num_episodes=EPISODES,
+                   num_epoches=1000,
+                   replay_memory_size=500000,
+                   replay_memory_init_size=50000,
+                   experiment_dir=os.path.join(current_dir, 'log'),
+                   update_target_estimator_every=10000,
+                   discount_factor=DISCOUNT_FACTOR,
+                   epsilon_start=EPSILON_START,
+                   epsilon_end=EPSILON_END,
+                   epsilon_decay_steps=EPSILON_DECAY_STEPS,
+                   batch_size=512,
+                   num_LabelPropagation=20,
+                   num_active_learning=5,
+                   test=0)
+
+
+if __name__ == "__main__":
+    main()
