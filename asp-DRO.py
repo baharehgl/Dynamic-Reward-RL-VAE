@@ -146,11 +146,24 @@ original_dim = 3  # Depends on the dimension of your input data
 latent_dim = 10
 intermediate_dim = 64
 
-# Load and train VAE
+# Load normal data
 data_directory = os.path.join(current_dir, 'normal-data')
-x_train = load_normal_data(data_directory, n_steps=n_steps)
+x_train_sequences = load_normal_data(data_directory, n_steps=n_steps)
 
+# Modify the training data to include only the last time step from each sequence
+x_train = x_train_sequences[:, -1, :]  # Shape: (samples, 3)
+
+# ========================== VAE Training ================================
+# Train the VAE on single time steps
 vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
+vae.fit(x_train, epochs=50, batch_size=32)
+
+# Save the trained VAE model
+vae_save_path = os.path.join(current_dir, 'vae_model.h5')
+vae.save(vae_save_path)
+
+# Load pretrained VAE for inference
+vae = load_model(vae_save_path, custom_objects={'Sampling': Sampling}, compile=False)
 
 # ========================== Reward Function with APS ==========================
 def kl_divergence(p, q):
@@ -213,8 +226,11 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
         list: Reward values for actions [NOT_ANOMALY, ANOMALY].
     """
     if timeseries_curser >= n_steps:
-        # Extract the current window for VAE reconstruction
-        current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
+        # Extract the current time step for VAE reconstruction
+        current_time_step = timeseries['value'][timeseries_curser]
+        current_state = np.array([current_time_step])  # Shape: (1, 3)
+
+        # Predict reconstruction
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
 
@@ -231,17 +247,17 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_
         # Retrieve the true label
         true_label = timeseries['label'][timeseries_curser]
 
-        # Define extrinsic reward based on the true label
+        # Define rewards based on the true label and action
         if true_label == NOT_ANOMALY:
-            r1 = TN_Value
-            r2 = vae_penalty
-            reward = r1 + tau * r2  # Scale only intrinsic reward
-            return [reward, FP_Value + tau * vae_penalty]
+            # If true label is NOT_ANOMALY
+            reward_not_anomaly = TN_Value + tau * vae_penalty
+            reward_anomaly = FP_Value + tau * vae_penalty
+            return [reward_not_anomaly, reward_anomaly]
         elif true_label == ANOMALY:
-            r1 = FN_Value
-            r2 = vae_penalty
-            reward = r1 + tau * r2  # Scale only intrinsic reward
-            return [FN_Value + tau * vae_penalty, TP_Value + tau * vae_penalty]
+            # If true label is ANOMALY
+            reward_not_anomaly = FN_Value + tau * vae_penalty
+            reward_anomaly = TP_Value + tau * vae_penalty
+            return [reward_not_anomaly, reward_anomaly]
     else:
         return [0, 0]  # No reward for initial steps
 
@@ -700,12 +716,12 @@ def q_learning(env,
                 # Calculate Q values and targets
                 # Assuming next_states_batch contains possible next states for actions
                 try:
-                    next_states_batch = np.squeeze(np.split(next_states_batch, 2, axis=1))
+                    next_states_split = np.split(next_states_batch, 2, axis=1)
+                    next_states_batch0 = next_states_split[0].reshape(-1, n_steps, n_input_dim)
+                    next_states_batch1 = next_states_split[1].reshape(-1, n_steps, n_input_dim)
                 except ValueError as e:
                     print(f"Error splitting next_states_batch: {e}")
                     continue
-                next_states_batch0 = next_states_batch[0]
-                next_states_batch1 = next_states_batch[1]
 
                 q_values_next0 = target_estimator.predict(state=next_states_batch0)
                 q_values_next1 = target_estimator.predict(state=next_states_batch1)
@@ -937,7 +953,8 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
 
     # Load the dataset
     data_directory = os.path.join(current_dir, 'normal-data')
-    x_train = load_normal_data(data_directory, n_steps=n_steps)
+    x_train_sequences = load_normal_data(data_directory, n_steps=n_steps)
+    x_train = x_train_sequences[:, -1, :]  # Shape: (samples, 3)
 
     # Train a Variational Autoencoder (VAE)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
