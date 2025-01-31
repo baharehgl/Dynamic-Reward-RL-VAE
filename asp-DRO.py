@@ -199,10 +199,12 @@ class Q_Estimator_Nonlinear():
 
             # Define weights and biases for output layer
             self.weights = {
-                'out': tf.Variable(tf.compat.v1.random_normal([n_hidden_dim, action_space_n]))
+                'out': tf.compat.v1.get_variable('out_weights', shape=[n_hidden_dim, action_space_n],
+                                                 initializer=tf.compat.v1.random_normal_initializer())
             }
             self.biases = {
-                'out': tf.Variable(tf.compat.v1.random_normal([action_space_n]))
+                'out': tf.compat.v1.get_variable('out_biases', shape=[action_space_n],
+                                                 initializer=tf.compat.v1.random_normal_initializer())
             }
 
             # Define an LSTM cell using TensorFlow's native API
@@ -535,11 +537,6 @@ def q_learning(env,
     else:
         print("No checkpoint found. Starting fresh training.")
 
-    # Get the current global step
-    global_step = tf.compat.v1.train.get_or_create_global_step()
-    sess.run(global_step.assign(0))  # Initialize global_step to 0
-    print("Global step initialized to 0.")
-
     # Epsilon decay schedule
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
 
@@ -697,16 +694,16 @@ def main():
     vae_model, encoder = build_vae(original_dim=original_dim, latent_dim=2, intermediate_dim=64)
     print("VAE model initialized.")
 
+    # Initialize Q-Learning estimators
+    qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn_estimator", summaries_dir=os.path.join(current_dir, 'log'))
+    target_estimator = Q_Estimator_Nonlinear(scope="target_estimator", summaries_dir=os.path.join(current_dir, 'log'))
+    print("Q-Learning estimators initialized.")
+
     # Start TensorFlow session
     with tf.compat.v1.Session() as sess:
+        # Initialize all variables **after** estimators are created
         sess.run(tf.compat.v1.global_variables_initializer())
         print("TensorFlow session started and variables initialized.")
-
-        # Initialize Q-Learning estimators
-        qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn_estimator",
-                                                 summaries_dir=os.path.join(current_dir, 'log'))
-        target_estimator = Q_Estimator_Nonlinear(scope="target_estimator",
-                                                 summaries_dir=os.path.join(current_dir, 'log'))
 
         # Initialize target network parameters to match the Q-learning network
         copy_model_parameters(sess, qlearn_estimator, target_estimator)
