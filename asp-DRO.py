@@ -464,6 +464,7 @@ def q_learning(env,
                sess,
                qlearn_estimator,
                target_estimator,
+               vae_model,
                num_episodes=500,
                num_epoches=1000,
                replay_memory_size=500000,
@@ -477,8 +478,7 @@ def q_learning(env,
                batch_size=512,
                num_LabelPropagation=20,
                num_active_learning=5,
-               test=0,
-               vae_model=None):
+               test=0):
     """
     Q-Learning algorithm for off-policy TD control using Function Approximation.
     Finds the optimal greedy policy while following an epsilon-greedy policy.
@@ -488,6 +488,7 @@ def q_learning(env,
         sess: TensorFlow session.
         qlearn_estimator: Q-learning estimator.
         target_estimator: Target estimator.
+        vae_model: Pretrained VAE model.
         num_episodes: Number of episodes to run for.
         num_epoches: Number of epochs per episode.
         replay_memory_size: Maximum size of replay memory.
@@ -502,13 +503,12 @@ def q_learning(env,
         num_LabelPropagation: Number of samples for label propagation.
         num_active_learning: Number of active learning samples.
         test: Flag for testing mode.
-        vae_model: Pretrained VAE model.
 
     Returns:
         None
     """
-    # Define a named tuple for storing experiences
-    Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
+    # Define a named tuple for storing experiences, including action
+    Transition = namedtuple("Transition", ["state", "action", "reward", "next_state", "done"])
 
     # The replay memory
     replay_memory = deque(maxlen=replay_memory_size)
@@ -616,7 +616,7 @@ def q_learning(env,
             next_state, reward, done, _ = env.step(action)
 
             # Add experience to replay memory
-            replay_memory.append(Transition(state, reward, next_state, done))
+            replay_memory.append(Transition(state, action, reward, next_state, done))
             total_t += 1
 
             if done:
@@ -645,11 +645,11 @@ def q_learning(env,
             total_t += 1
 
             # Add experience to replay memory
-            replay_memory.append(Transition(state, reward, next_state, done))
+            replay_memory.append(Transition(state, action, reward, next_state, done))
 
             # Sample a minibatch from replay memory
             minibatch = random.sample(replay_memory, batch_size)
-            states_mb, rewards_mb, next_states_mb, dones_mb = zip(*minibatch)
+            states_mb, actions_mb, rewards_mb, next_states_mb, dones_mb = zip(*minibatch)
 
             # Prepare target Q-values
             target_q = qlearn_estimator.predict(states_mb, sess)
@@ -658,16 +658,10 @@ def q_learning(env,
             targets = np.copy(target_q)
 
             for i in range(len(minibatch)):
-                current_action = action  # Note: This should be the action taken in the minibatch, not the current action
-                # However, since 'action' is from the current step, it's incorrect. We need to extract actions from the minibatch.
-                # To fix this, we'll modify the namedtuple to include 'action'
-                # For simplicity, let's assume all actions in minibatch are the same as the current action
-                # This is not ideal and needs correction in the step function
-                # Here, we proceed with the current code
                 if dones_mb[i]:
-                    targets[i][action] = rewards_mb[i]
+                    targets[i][actions_mb[i]] = rewards_mb[i]
                 else:
-                    targets[i][action] = rewards_mb[i] + discount_factor * np.max(next_q[i])
+                    targets[i][actions_mb[i]] = rewards_mb[i] + discount_factor * np.max(next_q[i])
 
             # Train the Q-network
             qlearn_estimator.update(states_mb, targets, sess)
