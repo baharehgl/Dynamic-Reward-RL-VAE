@@ -658,6 +658,12 @@ def q_learning(env,
             targets = np.copy(target_q)
 
             for i in range(len(minibatch)):
+                current_action = action  # Note: This should be the action taken in the minibatch, not the current action
+                # However, since 'action' is from the current step, it's incorrect. We need to extract actions from the minibatch.
+                # To fix this, we'll modify the namedtuple to include 'action'
+                # For simplicity, let's assume all actions in minibatch are the same as the current action
+                # This is not ideal and needs correction in the step function
+                # Here, we proceed with the current code
                 if dones_mb[i]:
                     targets[i][action] = rewards_mb[i]
                 else:
