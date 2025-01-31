@@ -464,8 +464,8 @@ def q_learning(env,
                sess,
                qlearn_estimator,
                target_estimator,
-               num_episodes,
-               num_epoches,
+               num_episodes=500,
+               num_epoches=1000,
                replay_memory_size=500000,
                replay_memory_init_size=50000,
                experiment_dir='./log/',
@@ -591,7 +591,7 @@ def q_learning(env,
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     print("Isolation Forest model trained.")
 
-    # Initialize Label Propagation model
+    # Initialize Label Spreading model
     lp_model = LabelSpreading()
     print("Label Spreading model initialized.")
 
