@@ -1,184 +1,193 @@
-# environment/time_series_repo.py
-
-import os
 import pandas as pd
 import numpy as np
+import random
+import os
+
+import sklearn.preprocessing
+
+NOT_ANOMALY = 0
+ANOMALY = 1
+
+REWARD_CORRECT = 1
+REWARD_INCORRECT = -1
+
+action_space = [NOT_ANOMALY, ANOMALY]
 
 
-class EnvTimeSeriesfromRepo:
-    """
-    Custom Environment for Time Series Data from Repository.
-    """
+# each csv file in Yahoo Benchmark is read as the following,
+# therefore contains two columns:
+# - value
+# - anomaly
+# pd.read_csv(self.repodirext[random.randint(0, len(self.repodirext)-1)], usecols=[1,2], \
+#                       header=0, names=['value','anomaly'])
 
-    def __init__(self, repodir, n_steps=50):
-        """
-        Initializes the environment by loading time series data from CSV files.
+def defaultStateFuc(timeseries, timeseries_curser):
+    return timeseries['value'][timeseries_curser]
 
-        Args:
-            repodir (str): Directory containing CSV files.
-            n_steps (int): Number of steps in each state.
-        """
+
+def defaultRewardFuc(timeseries, timeseries_curser, action):
+    if action == timeseries['anomaly'][timeseries_curser]:
+        return REWARD_CORRECT
+    else:
+        return REWARD_INCORRECT
+
+
+class EnvTimeSeriesfromRepo():
+    # init the class instance
+    def __init__(self, repodir='environment/time_series_repo/'):
+
+        # get all the path of the csv files to be loaded
         self.repodir = repodir
-        self.n_steps = n_steps
-        self.datasets = self.load_datasets()
-        self.datasetsize = len(self.datasets)
-        self.dataset_idx = 0
-        self.timeseries = None
+        self.repodirext = []
+
+        for subdir, dirs, files in os.walk(self.repodir):
+            for file in files:
+                if file.find('.csv') != -1:
+                    self.repodirext.append(os.path.join(subdir, file))
+
+        self.action_space_n = len(action_space)
+
+        self.timeseries = []
+        self.timeseries_curser = -1
+        self.timeseries_curser_init = 0
+        self.timeseries_states = []
+
+        self.statefnc = defaultStateFuc
+        self.rewardfnc = defaultRewardFuc
+
+        self.datasetsize = len(self.repodirext)
+
+        self.datasetfix = 0
+        self.datasetidx = random.randint(0, len(self.repodirext) - 1)
+        self.datasetrng = self.datasetsize
+
+        self.timeseries_repo = []
+
         self.states_list = []
 
-    def load_datasets(self):
-        """
-        Loads all CSV files from the repository directory.
+        for i in range(len(self.repodirext)):
+            """
+            The following two lines are used instead of the third line when DataMarket is the data source.
+            """
+            # ts = pd.read_csv(self.repodirext[i], usecols=[1], header=0, skipfooter=2, names=['value'], engine='python')
+            # ts['anomaly'] = pd.Series(np.zeros(len(ts['value'])), index=ts.index)
 
-        Returns:
-            list of pd.DataFrame: List containing all loaded datasets.
-        """
-        if not os.path.exists(self.repodir):
-            raise FileNotFoundError(f"Repository directory {self.repodir} does not exist.")
+            """
+            The following line is used instead of the third line when Numenta is the data source.
+            """
+            # ts = pd.read_csv(self.repodirext[i], usecols=[1,3], header=0, names=['value','anomaly'])
 
-        all_files = [os.path.join(self.repodir, fname) for fname in os.listdir(self.repodir) if fname.endswith('.csv')]
-        if not all_files:
-            raise FileNotFoundError(f"No CSV files found in directory {self.repodir}.")
+            """
+            The following line is used instead of the third line when Yahoo Benchmark is the data source.
+            """
 
-        datasets = []
-        for file in all_files:
-            try:
-                df = pd.read_csv(file)
-                if 'value' not in df.columns or 'anomaly' not in df.columns:
-                    print(f"Skipping {file}: Missing 'value' or 'anomaly' columns.")
-                    continue
-                df = df[['value', 'anomaly']].dropna()
-                if df.shape[0] < self.n_steps:
-                    print(f"Skipping {file}: Less than {self.n_steps} rows after cleaning.")
-                    continue
-                datasets.append(df)
-                print(f"Loaded dataset {file} with {df.shape[0]} rows.")
-            except Exception as e:
-                print(f"Error loading {file}: {e}")
+            ts = pd.read_csv(self.repodirext[i], usecols=[1, 2], header=0, names=['value', 'anomaly'])
 
-        if not datasets:
-            raise ValueError(
-                f"No valid datasets found in {self.repodir}. Ensure CSV files have 'value' and 'anomaly' columns with at least {self.n_steps} rows.")
+            '''
+            The following line is used when KPI dataset is the data source
+            '''
+            #ts = pd.read_csv(self.repodirext[i], usecols=[1, 2], header=0, names=['value', 'anomaly'])
 
-        print(f"Total datasets loaded: {len(datasets)}")
-        return datasets
+            # add a marker column for 1:anomaly, 0:non-anomaly, -1: unlabeled
+            ts['label'] = -1
 
+            ts = ts.astype(np.float32)
+
+            scaler = sklearn.preprocessing.MinMaxScaler()
+            scaler.fit(np.array(ts['value']).reshape(-1, 1))
+            ts['value'] = scaler.transform(np.array(ts['value']).reshape(-1, 1))
+
+            self.timeseries_repo.append(ts)
+
+    # reset the instance
     def reset(self):
-        """
-        Resets the environment to the initial state.
+        # 1. select a new time series from the repo and load
+        # the time series contains "timestamp", "value", "anomaly"
+        if self.datasetfix == 0:
+            self.datasetidx = (self.datasetidx + 1) % self.datasetrng
+        print (self.repodirext[self.datasetidx])
+        self.timeseries = self.timeseries_repo[self.datasetidx]
+        self.timeseries_curser = self.timeseries_curser_init
 
-        Returns:
-            np.ndarray: The first state.
-        """
-        self.dataset_idx = 0  # Reset to the first dataset
-        self.timeseries = self.load_timeseries(self.dataset_idx)
-        print(f"Environment reset to dataset index {self.dataset_idx}. Timeseries length: {len(self.timeseries)}")
+        # 2. return the first state, containing the first element of the time series
+        self.timeseries_states = self.statefnc(self.timeseries, self.timeseries_curser)
+
+        # update states list
         self.states_list = self.get_states_list()
-        return self.states_list[0] if self.states_list else None
 
-    def load_timeseries(self, idx):
-        """
-        Loads the time series data for the given dataset index.
+        return self.timeseries_states
 
-        Args:
-            idx (int): Index of the dataset to load.
+    # reset the env to a specific file
+    def reset_to(self, id):
+        self.datasetidx = id
+        self.timeseries = self.timeseries_repo[self.datasetidx]
+        self.timeseries_curser = self.timeseries_curser_init
 
-        Returns:
-            pd.DataFrame: The loaded time series data.
-        """
-        if idx < 0 or idx >= self.datasetsize:
-            raise IndexError(f"Dataset index {idx} out of range. Total datasets: {self.datasetsize}")
-        print(f"Loading dataset index {idx}")
-        return self.datasets[idx].reset_index(drop=True)
+        # 2. return the first state, containing the first element of the time series
+        self.timeseries_states = self.statefnc(self.timeseries, self.timeseries_curser)
+
+        # update states list
+        self.states_list = self.get_states_list()
+
+        return self.timeseries_states
+
+    # return the whole dataset
+    def reset_getall(self):
+        # 1. select a new time series from the repo and load
+        # the time series contains "timestamp", "value", "anomaly"
+        if self.datasetfix == 0:
+            self.datasetidx = (self.datasetidx + 1) % self.datasetrng
+
+        self.timeseries = pd.read_csv(self.repodirext[self.datasetidx], \
+                                      usecols=[0, 1, 2], header=0, names=['timestamp', 'value', 'anomaly'])
+        self.timeseries = self.timeseries.astype(np.float32)
+        self.timeseries_curser = self.timeseries_curser_init
+
+        # 2. Preprocess the time series values
+        scaler = sklearn.preprocessing.MinMaxScaler()
+        scaler.fit(np.array(self.timeseries['value']).reshape(-1, 1))
+        self.timeseries['value'] = scaler.transform(np.array(self.timeseries['value']).reshape(-1, 1))
+
+        return self.timeseries
+
+    # take a step and gain a reward
+    def step(self, action):
+        # assert(action in action_space)
+        # assert(self.timeseries_curser >= 0)
+
+        # 1. get the reward of the action
+        reward = self.rewardfnc(self.timeseries, self.timeseries_curser, action)
+
+        # 2. get the next state and the done flag after the action
+        self.timeseries_curser += 1
+
+        if self.timeseries_curser >= self.timeseries['value'].size:
+            done = 1
+            state = np.array([self.timeseries_states, self.timeseries_states])
+        else:
+            done = 0
+            state = self.statefnc(self.timeseries, self.timeseries_curser, self.timeseries_states, action)
+
+        if len(np.shape(state)) > len(np.shape(self.timeseries_states)):
+            self.timeseries_states = state[action]
+        else:
+            self.timeseries_states = state
+
+        return state, reward, done, []
 
     def get_states_list(self):
-        """
-        Generates a list of states from the timeseries data.
-
-        Returns:
-            list of np.ndarray: List containing all generated states.
-        """
+        self.timeseries = self.timeseries_repo[self.datasetidx]
+        self.timeseries_curser = self.timeseries_curser_init
         state_list = []
-        for cursor in range(len(self.timeseries)):
-            if cursor < self.n_steps:
-                # Not enough data to form a state
-                continue
-            if not state_list:
-                # Initialize the first state without a previous state
-                state = self.statefnc(self.timeseries, cursor, previous_state=None, action=None)
-                print(f"Initializing first state at cursor {cursor}.")
+        for cursor in range(self.timeseries_curser_init, self.timeseries['value'].size):
+            if len(state_list) == 0:
+                state = self.statefnc(self.timeseries, cursor)
             else:
-                # Use the last state in the list
-                state = self.statefnc(self.timeseries, cursor, previous_state=state_list[-1], action=None)
+                state = self.statefnc(self.timeseries, cursor, state_list[-1])
+                state = state[0]
             state_list.append(state)
-            print(f"State {len(state_list)} generated at cursor {cursor}.")
-        print(f"Total states generated: {len(state_list)}")
         return state_list
 
-    def statefnc(self, timeseries, cursor, previous_state=None, action=None):
-        """
-        Function to generate the next state based on the current action and previous state.
 
-        Args:
-            timeseries (pd.DataFrame): The time series data.
-            cursor (int): Current position in the time series.
-            previous_state (np.ndarray or None): The previous state.
-            action (int or None): The action taken.
 
-        Returns:
-            np.ndarray: The new state.
-        """
-        if previous_state is None:
-            # Initialize the state with the first n_steps data points
-            state = timeseries[['value', 'anomaly']].values[cursor - self.n_steps:cursor]
-            print(f"Created initial state with shape {state.shape}.")
-        else:
-            # Update the state based on the action
-            # For simplicity, assume state shifts and appends new data point
-            state = np.roll(previous_state, -1, axis=0)
-            state[-1] = timeseries[['value', 'anomaly']].values[cursor]
-            print(f"Updated state at cursor {cursor} with shape {state.shape}.")
-        return state
-
-    def step(self, action):
-        """
-        Applies the given action to the environment and returns the next state and reward.
-
-        Args:
-            action (int): The action to take.
-
-        Returns:
-            tuple: (next_state, reward, done, info)
-        """
-        # Implement the environment's response to the action.
-        # This is a placeholder and should be replaced with actual logic.
-        # For example purposes, we'll assume a random next state and reward.
-
-        # Find the current state index based on states_list
-        # This requires tracking the current position in states_list
-        # For simplicity, let's assume that 'state_list' progresses linearly
-
-        # Placeholder implementation:
-        # Determine the index of the current state
-        current_state_index = self.states_list.index(self.current_state) if hasattr(self, 'current_state') else 0
-
-        if current_state_index + 1 >= len(self.states_list):
-            # Reached the end of the states_list
-            done = True
-            next_state = None
-            reward = 0
-            print("Reached the end of the states_list.")
-        else:
-            # Move to the next state
-            next_state = self.states_list[current_state_index + 1]
-            self.current_state = next_state
-            done = False
-
-            # Placeholder reward logic
-            # Replace this with your actual reward function
-            reward = 1 if action == 1 else 0  # Example: reward for taking action '1'
-
-            print(f"Took action {action}. Reward: {reward}. Next state index: {current_state_index + 1}")
-
-        return next_state, reward, done, {}
 
