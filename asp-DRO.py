@@ -26,18 +26,20 @@ tf.compat.v1.disable_eager_execution()
 # Get the current script directory and build relative paths.
 # ----------------------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# If you need to import modules from the parent directory, add it to sys.path:
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
 
-# Data directories relative to the current file location:
-normal_data_directory = os.path.join(parent_dir, 'normal-data')
-anomaly_data_directory = os.path.join(parent_dir, 'ydata-labeled-time-series-anomalies-v1_0', 'A1Benchmark')
+# Adjust these paths based on your repository structure.
+# In this example, the data folders are in the same directory as this script.
+normal_data_directory = os.path.join(current_dir, 'normal-data')
+anomaly_data_directory = os.path.join(current_dir, 'ydata-labeled-time-series-anomalies-v1_0', 'A1Benchmark')
+
+# If you need to import modules from a subfolder (e.g., environment), adjust sys.path accordingly.
+# For example, if the environment module is inside a subfolder named "environment" in your repository:
+sys.path.append(current_dir)
 
 # ----------------------------------------------------------------
 # Import environment module from the sub-folder "environment"
 # Adjust the import if your folder structure is different.
-from environment.time_series_repo import EnvTimeSeriesfromRepo
+from environment.time_series_repo_ext import EnvTimeSeriesfromRepo
 
 # Set which GPUs to use if needed (adjust or remove if not using GPUs)
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
@@ -642,3 +644,4 @@ train(100, 30, 0.92, learn_tau=True)
 train(150, 50, 0.94, learn_tau=True)
 train(200, 100, 0.96, learn_tau=True)
 
+# You can uncomment or modify additional training calls as needed.
