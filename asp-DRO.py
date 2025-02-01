@@ -1,50 +1,48 @@
-import matplotlib
-
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import os
+import sys
+import time
+import random
+import itertools
 import numpy as np
 import pandas as pd
-import itertools
-import random
-import sys
-import os
-import time
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from scipy import stats
 import tensorflow as tf
-from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, matthews_corrcoef
-
-tf.compat.v1.disable_eager_execution()
-
-# from tensorflow.contrib import rnn
-
-from mpl_toolkits.mplot3d import axes3d
 from collections import deque, namedtuple
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, matthews_corrcoef
+from sklearn.preprocessing import StandardScaler
 from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
-from sklearn.preprocessing import StandardScaler
+from mpl_toolkits.mplot3d import axes3d
+from sklearn.svm import OneClassSVM
+from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 
-# print(sys.path)
-# import the library in the sub-folder environment
-# sys.path.append('C:/Users/Asus/Documents/PSU-Course/sbsplusplus-master/Codes/RL4AD')
-# sys.path.append("C:\Users\Asus\Documents\PSU-Course\sbsplusplus-master\RL4AD\environment")
+# Disable eager execution if necessary
+tf.compat.v1.disable_eager_execution()
 
-# get the current directory of the script
+# ----------------------------------------------------------------
+# Get the current script directory and build relative paths.
+# ----------------------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# get the parent directory of the current directory
+# If you need to import modules from the parent directory, add it to sys.path:
 parent_dir = os.path.dirname(current_dir)
-# append the parent directory to the sys.path list
 sys.path.append(parent_dir)
 
-from environment.time_series_repo_ext import EnvTimeSeriesfromRepo
-# from ..environment.time_series_repo_ext import EnvTimeSeriesfromRepo
-from sklearn.svm import OneClassSVM
-# from sklearn.semi_supervised import label_propagation
-from sklearn.semi_supervised import LabelPropagation
-from sklearn.semi_supervised import LabelSpreading
+# Data directories relative to the current file location:
+normal_data_directory = os.path.join(parent_dir, 'normal-data')
+anomaly_data_directory = os.path.join(parent_dir, 'ydata-labeled-time-series-anomalies-v1_0', 'A1Benchmark')
 
+# ----------------------------------------------------------------
+# Import environment module from the sub-folder "environment"
+# Adjust the import if your folder structure is different.
+from environment.time_series_repo import EnvTimeSeriesfromRepo
+
+# Set which GPUs to use if needed (adjust or remove if not using GPUs)
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
-# macros for running q-learning
+# Macros and constants
 DATAFIXED = 0  # whether target at a single time series dataset
 
 EPISODES = 500  # number of episodes for training
@@ -70,29 +68,12 @@ FN_Value = -5
 
 validation_separate_ratio = 0.9
 
-
-########################### VAE #####################
-def load_normal_data(data_path):
-    # Example assumes CSV files; adjust if your data format differs
-    all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
-    data_list = [pd.read_csv(file) for file in all_files]
-    data = pd.concat(data_list, axis=0, ignore_index=True)
-
-    # Assume your data needs to be scaled - adjust depending on your actual features
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(data.values)
-    return scaled_data
-
-
-# Path to the directory containing normal data
-data_directory = r'C:\Users\Asus\Documents\PSU-Course\sbsplusplus-master\normal-data'
-# data_directory = r'C:\Users\robotics\PycharmProjects\Anomaly project\sbsplusplus-master\normal-data'
-x_train = load_normal_data(data_directory)
-
+# ----------------------------------------------------------------
+# VAE-related functions and layers
+# ----------------------------------------------------------------
 
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the vector encoding a digit."""
-
     def call(self, inputs):
         z_mean, z_log_var = inputs
         batch = tf.shape(z_mean)[0]
@@ -100,36 +81,14 @@ class Sampling(layers.Layer):
         epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
-
-'''
-def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
-    # Encoder
-    inputs = layers.Input(shape=(original_dim,))
-    h = layers.Dense(intermediate_dim, activation='relu')(inputs)
-    z_mean = layers.Dense(latent_dim)(h)
-    z_log_var = layers.Dense(latent_dim)(h)
-    z = Sampling()([z_mean, z_log_var])
-
-    # Decoder
-    decoder_h = layers.Dense(intermediate_dim, activation='relu')
-    decoder_mean = layers.Dense(original_dim, activation='sigmoid')
-    h_decoded = decoder_h(z)
-    x_decoded_mean = decoder_mean(h_decoded)
-
-    # Models
-    encoder = models.Model(inputs, [z_mean, z_log_var, z])
-    vae = models.Model(inputs, x_decoded_mean)
-
-    # Loss
-    reconstruction_loss = losses.binary_crossentropy(inputs, x_decoded_mean) * original_dim
-    kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
-    vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
-    vae.add_loss(vae_loss)
-    vae.compile(optimizer='adam')
-
-    return vae, encoder
-'''
-
+def load_normal_data(data_path):
+    # Example assumes CSV files; adjust if your data format differs
+    all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
+    data_list = [pd.read_csv(file) for file in all_files]
+    data = pd.concat(data_list, axis=0, ignore_index=True)
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(data.values)
+    return scaled_data
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     inputs = layers.Input(shape=(original_dim,))
@@ -157,222 +116,116 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer='adam')
     return vae, encoder
 
-
-# Constants
-original_dim = 3  # Depends on the dimension of your input data
+# Constants for VAE
+original_dim = 3  # Depends on your input feature dimension
 latent_dim = 10
 intermediate_dim = 64
 
 vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 
-
-######################################################
-
-
-# The state function returns a vector composing of n_steps of n_input_dim data instances:
-# e.g., [[x_1, f_1], [x_2, f_2], ..., [x_t, f_t]] of shape (n_steps, n_input_dim)
-# x_t is the new data instance. t here is equal to n_steps
+# ----------------------------------------------------------------
+# RL state and reward functions
+# ----------------------------------------------------------------
 
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
     if timeseries_curser == n_steps:
         state = []
         for i in range(timeseries_curser):
             state.append([timeseries['value'][i], 0])
-
         state.pop(0)
         state.append([timeseries['value'][timeseries_curser], 1])
-
         return np.array(state, dtype='float32')
-
     if timeseries_curser > n_steps:
         state0 = np.concatenate((previous_state[1:n_steps],
                                  [[timeseries['value'][timeseries_curser], 0]]))
         state1 = np.concatenate((previous_state[1:n_steps],
                                  [[timeseries['value'][timeseries_curser], 1]]))
-
         return np.array([state0, state1], dtype='float32')
-
-
-# Also, because we use binary tree here, the reward function returns a list of rewards for each action
-'''
-def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0):
-    if timeseries_curser >= n_steps:
-        if timeseries['label'][timeseries_curser] == 0:
-            return [TN_Value, FP_Value]
-
-        if timeseries['label'][timeseries_curser] == 1:
-            return [FN_Value, TP_Value]
-    else:
-        return [0, 0]
-
-
-
-
-def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
-    if timeseries_curser >= n_steps:
-        current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
-        vae_reconstruction = vae.predict(current_state)
-        reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-
-        # Increase the weight of the VAE penalty
-        vae_penalty = -scale_factor * reconstruction_error  # Scaled penalty
-
-        if timeseries['label'][timeseries_curser] == 0:
-            return [TN_Value + vae_penalty, FP_Value + vae_penalty]
-        if timeseries['label'][timeseries_curser] == 1:
-            return [FN_Value + vae_penalty, TP_Value + vae_penalty]
-    else:
-        return [0, 0]
-'''
-
 
 def kl_divergence(p, q):
     """Compute the KL divergence KL(p || q)."""
-    p = np.clip(p, 1e-10, 1)  # Avoid log(0)
+    p = np.clip(p, 1e-10, 1)
     q = np.clip(q, 1e-10, 1)
     return np.sum(p * np.log(p / q))
-
 
 def adaptive_scaling_factor_dro(preference_strength, tau_min=0.1, tau_max=5.0, rho=0.5, max_iter=10):
     """
     Learn tau dynamically using DRO (KL-constrained optimization).
-
-    Args:
-    - preference_strength: Probability of preference (sigmoid of reconstruction error).
-    - tau_min, tau_max: Bounds for tau.
-    - rho: Regularization term for DRO.
-    - max_iter: Iterations for optimizing tau.
-
-    Returns:
-    - Optimized tau.
     """
     tau = 1.0  # Initialize tau
-
     for _ in range(max_iter):
-        # Compute KL divergence constraint
         kl_term = kl_divergence([preference_strength, 1 - preference_strength], [0.5, 0.5])
-
-        # Gradient of the DRO loss w.r.t. tau
         grad = -np.log(1 + np.exp(-preference_strength / tau)) + rho - kl_term
-
-        # Hessian (second derivative)
-        hess = preference_strength ** 2 * np.exp(-preference_strength / tau) / (
-                tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2)
-
-        # Newton's update step for tau
+        hess = preference_strength ** 2 * np.exp(-preference_strength / tau) / (tau ** 3 * (1 + np.exp(-preference_strength / tau)) ** 2)
         tau = tau - grad / (hess + 1e-8)
-
-        # Project tau to be within valid bounds
         tau = np.clip(tau, tau_min, tau_max)
-
     return tau
 
-
 tau_values = []
-
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, scale_factor=10):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-
         vae_penalty = -scale_factor * reconstruction_error
-
         preference_strength = np.clip(1 / (1 + np.exp(-reconstruction_error)), 0.05, 0.95)
-
         tau = adaptive_scaling_factor_dro(preference_strength)
-        tau_values.append(tau)  # Store tau for visualization
-        '''
-
-        if timeseries['label'][timeseries_curser] == 0:
-            return [tau * (TN_Value + vae_penalty), tau * (FP_Value + vae_penalty)]
-        if timeseries['label'][timeseries_curser] == 1:
-            return [tau * (FN_Value + vae_penalty), tau * (TP_Value + vae_penalty)]
-            '''
+        tau_values.append(tau)
         if timeseries['label'][timeseries_curser] == 0:
             return [(TN_Value + tau * (vae_penalty)), (FP_Value + tau * (vae_penalty))]
         if timeseries['label'][timeseries_curser] == 1:
             return [(FN_Value + tau * (vae_penalty)), (TP_Value + tau * (vae_penalty))]
-
-
     else:
         return [0, 0]
-
 
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
             return [TN_Value, FP_Value]
-
         if timeseries['anomaly'][timeseries_curser] == 1:
             return [FN_Value, TP_Value]
     else:
         return [0, 0]
 
+# ----------------------------------------------------------------
+# Q-Learning: Neural Network Estimator and supporting functions
+# ----------------------------------------------------------------
 
 class Q_Estimator_Nonlinear():
     """
-    Action-Value Function Approximator Q(s,a) with Tensorflow RNN.
-    Note: The Recurrent Neural Network is used here !
+    Action-Value Function Approximator Q(s,a) using a TensorFlow RNN.
     """
-
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
         self.summary_writer = None
-
         with tf.compat.v1.variable_scope(scope):
-            # tf Graph input
-            # The input to the rnn is typically of the shape:
-            # [batch_size, n_steps, n_input_dim]
-            # RNN requires the data of the shape:
-            # n_steps tensors of [batch_size, n_input_dim]
             self.state = tf.compat.v1.placeholder(shape=[None, n_steps, n_input_dim],
                                                   dtype=tf.float32, name="state")
             self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
                                                    dtype=tf.float32, name="target")
-
-            # Define weights
             self.weights = {
                 'out': tf.Variable(tf.compat.v1.random_normal([n_hidden_dim, action_space_n]))
             }
             self.biases = {
                 'out': tf.Variable(tf.compat.v1.random_normal([action_space_n]))
             }
-
-            self.state_unstack = tf.unstack(self.state, n_steps, 1)
-            print(self.state_unstack)
-
-            # Define a lstm cell with tensorflow
+            self.state_unstack = tf.compat.v1.unstack(self.state, n_steps, 1)
             lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim, forget_bias=1.0)
-
-            # Get lstm cell output
-            self.outputs, self.states = tf.compat.v1.nn.static_rnn(lstm_cell,
-                                                                   self.state_unstack,
-                                                                   dtype=tf.float32)
-
-            # Linear activation, using rnn inner loop last output
+            self.outputs, self.states = tf.compat.v1.nn.static_rnn(lstm_cell, self.state_unstack, dtype=tf.float32)
             self.action_values = tf.matmul(self.outputs[-1], self.weights['out']) + self.biases['out']
-
-            # Loss and train op
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
-
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-
             self.train_op = self.optimizer.minimize(self.loss,
-                                                    global_step=
-                                                    tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
-                                                                                scope="global_step")[0])
-
-            # Summaries for Tensorboard
+                                                    global_step=tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
+                                                                                              scope="global_step")[0])
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
                 tf.compat.v1.summary.scalar("loss", self.loss),
                 tf.compat.v1.summary.histogram("q_values_hist", self.action_values),
                 tf.compat.v1.summary.scalar("q_value", tf.reduce_max(self.action_values))
             ])
-
             if summaries_dir:
                 summary_dir = os.path.join(summaries_dir, "summaries_{}".format(scope))
                 if not os.path.exists(summary_dir):
@@ -394,53 +247,31 @@ class Q_Estimator_Nonlinear():
             self.summary_writer.add_summary(summaries, global_step)
         return
 
-
 def copy_model_parameters(sess, estimator1, estimator2):
     """
     Copies the model parameters of one estimator to another.
-
-    Args:
-      sess: Tensorflow session instance
-      estimator1: Estimator to copy the paramters from
-      estimator2: Estimator to copy the parameters to
     """
     e1_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator1.scope)]
     e1_params = sorted(e1_params, key=lambda v: v.name)
     e2_params = [t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator2.scope)]
     e2_params = sorted(e2_params, key=lambda v: v.name)
-
     update_ops = []
     for e1_v, e2_v in zip(e1_params, e2_params):
         op = e2_v.assign(e1_v)
         update_ops.append(op)
-
     sess.run(update_ops)
-
 
 def make_epsilon_greedy_policy(estimator, nA):
     """
-    Creates an epsilon-greedy policy based on a given Q-function approximator and epsilon.
-
-    Args:
-        estimator: An estimator that returns q values for a given state
-        epsilon: The probability to select a random action. float between 0 and 1.
-        nA: Number of actions in the environment.
-
-    Returns:
-        A function that takes the observation as an argument and returns
-        the probabilities for each action in the form of a numpy array of length nA.
-
+    Creates an epsilon-greedy policy based on a given Q-function approximator.
     """
-
     def policy_fn(observation, epsilon):
         A = np.ones(nA, dtype='float32') * epsilon / nA
         q_values = estimator.predict(state=[observation])
         best_action = np.argmax(q_values)
         A[best_action] += (1.0 - epsilon)
         return A
-
     return policy_fn
-
 
 def q_learning(env,
                sess,
@@ -462,390 +293,148 @@ def q_learning(env,
                test=0,
                vae_model=None):
     """
-    Q-Learning algorithm for off-policy TD control using Function Approximation.
-    Finds the optimal greedy policy while following an epsilon-greedy policy.
-
-    Args:
-        env: The environment.
-        estimator: Action-Value function estimator
-        num_episodes: Number of episodes to run for.
-        discount_factor: Lambda time discount factor.
-        epsilon: Chance the sample a random action. Float betwen 0 and 1.
-        epsilon_decay: Each episode, epsilon is decayed by this factor
-
-    Returns:
-        NULL
+    Q-Learning algorithm for off-policy TD control using function approximation.
     """
-    # 1. Define some useful variable
-    # To memory
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
-
-    # The replay memory
     replay_memory = []
-
-    # Create directories for checkpoints and summaries
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
-
     checkpoint_path = os.path.join(checkpoint_dir, "model")
-
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
-
-    # Load a previous checkpoint if we find one
     saver = tf.compat.v1.train.Saver()
-
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
     if latest_checkpoint:
         print("Loading model checkpoint {}...\n".format(latest_checkpoint))
         saver.restore(sess, latest_checkpoint)
         if test:
             return
-
-    # Get the time step
-
     total_t = sess.run(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0])
-
-    # The epsilon decay schedule
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
-
-    # The policy we're following
-    policy = make_epsilon_greedy_policy(
-        qlearn_estimator,
-        env.action_space_n)
-
+    policy = make_epsilon_greedy_policy(qlearn_estimator, env.action_space_n)
     num_label = 0
 
-    # 2. Populate the replay memory with initial experience by SVM
+    # Warm-up: Populate replay memory using a warm-up strategy (e.g., IsolationForest)
     popu_time = time.time()
-
-    # warm up with active learning
     print('Warm up starting...')
-
     outliers_fraction = 0.01
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
-        # remove time window
         data_train.extend(env.states_list)
     # Isolation Forest model
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
-
-    # label propagation model
-    # lp_model = LabelPropagation.LabelSpreading()
     lp_model = LabelSpreading()
-
     for t in itertools.count():
         env.reset()
         data = np.array(env.states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        anomaly_score = model.decision_function(data)  # [-0.5, 0.5]
-        pred_score = [-1 * s + 0.5 for s in anomaly_score]  # [0, 0.5]
-        # threshold = stats.scoreatpercentile(pred_score, 100 * outliers_fraction)
+        anomaly_score = model.decision_function(data)
+        pred_score = [-1 * s + 0.5 for s in anomaly_score]
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
-
-        # al.label(warm_samples)
-
-        # retrieve input for label propagation
         state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
-        label_list = [-1] * len(state_list)  # remove labels
-
+        label_list = [-1] * len(state_list)
         for sample in warm_samples:
-            # pick up a state from warm_up samples
             state = env.states_list[sample]
-            # update the cursor
             env.timeseries_curser = sample + n_steps
             action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-            # mark the sample to labeled
             env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
             num_label += 1
-
-            # retrieve label for propagation
             label_list[sample] = int(env.timeseries['anomaly'][env.timeseries_curser])
-
             next_state, reward, done, _ = env.step(action)
-
             replay_memory.append(Transition(state, reward, next_state, done))
-
-        # label propagation main process:
-
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        # select up to N samples that is most certain about
         certainty_index = np.argsort(pred_entropies)
         certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
-        # give them pseudo labels
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
             env.timeseries['label'][index + n_steps] = pseudo_label
-
         if len(replay_memory) >= replay_memory_init_size:
             break
 
-    '''
-    # warm up without active learning
-    state = env.reset()
-    while env.datasetidx > env.datasetrng * validation_separate_ratio:
-        env.reset()
-        print 'double reset'
-
-    for i in range(replay_memory_init_size):
-        action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
-        action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-        # mark the sample to labeled
-        env.timeseries['labeled'][env.timeseries_curser] = 1
-        num_label += 1
-
-        next_state, reward, done, _ = env.step(action)
-        replay_memory.append(Transition(state, reward, next_state, done))
-
-        if done:
-            state = env.reset()
-            while env.datasetidx > env.datasetrng * validation_separate_ratio:
-                env.reset()
-                print 'double reset'
-        else:
-            state = next_state[action]
-    '''
-    popu_time = time.time() - popu_time
-    print("Populating replay memory with time {}".format(popu_time))
-
-    # 3. Start the main loop2
-    dict = {}
+    # Main loop of training episodes
     for i_episode in range(num_episodes):
-        # Save the current checkpoint
         if i_episode % 50 == 49:
             print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
             saver.save(tf.compat.v1.get_default_session(), checkpoint_path)
-
         per_loop_time1 = time.time()
-
-        # Reset the environment
         state = env.reset()
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             env.reset()
             print('double reset')
-        # Active learning:
-        # if a AL is needed
-
-        # index of already labeled samples of this TS
         labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
-        # transform to match state_list
         labeled_index = [item for item in labeled_index if item >= 25]
-        labeled_index = [item - n_steps for item in labeled_index]
-
         al = active_learning(env=env, N=num_active_learning, strategy='margin_sampling',
                              estimator=qlearn_estimator, already_selected=labeled_index)
-        # find the samples need to be labeled by human
         al_samples = al.get_samples()
-        print('labeling samples: ' + str(al_samples) + 'in env' + str(env.datasetidx))
-        # al.label(al_samples)
-        # add the new labeled samples
+        print('labeling samples: ' + str(al_samples) + ' in env ' + str(env.datasetidx))
         labeled_index.extend(al_samples)
         num_label += len(al_samples)
-
-        # retrieve input for label propagation
         state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
         label_list = np.array(env.timeseries['label'][n_steps:])
-
         for new_sample in al_samples:
             label_list[new_sample] = env.timeseries['anomaly'][n_steps + new_sample]
             env.timeseries['label'][n_steps + new_sample] = env.timeseries['anomaly'][n_steps + new_sample]
-
         for samples in labeled_index:
             env.timeseries_curser = samples + n_steps
-            # 3.1 Some Preprocess
-            # Epsilon for this time step
             epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
-
             state = env.states_list[samples]
-
-            # 3.2 The main work
-            # Choose an action to take
             action_probs = policy(state, epsilon)
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-            # Take a step
             next_state, reward, done, _ = env.step(action)
-
-            # 3.3 Control replay memory
             if len(replay_memory) == replay_memory_size:
                 replay_memory.pop(0)
-
             replay_memory.append(Transition(state, reward, next_state, done))
-
-        # label propagation main process:
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        # select up to N samples that is most certain about
         certainty_index = np.argsort(pred_entropies)
         certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
-        # give them pseudo labels
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
             env.timeseries['label'][index + n_steps] = pseudo_label
-
-        '''
-        ori_idx = env.datasetidx
-        if env.datasetidx >= 0:
-            if dict.has_key(env.datasetidx) is False:
-                already_selected = []
-                dict[env.datasetidx] = already_selected
-            al = active_learning(env=env, N=28, strategy='margin_sampling',
-                                 estimator=qlearn_estimator, already_selected=dict[env.datasetidx])
-            active_samples = al.get_samples()
-            #active_samples = al.get_samples_by_score(threshold=1.5)
-
-            # Label the samples
-            # al.label(active_samples)
-
-            # Add new-labeled samples
-
-            dict[env.datasetidx].extend(active_samples)
-            print 'add labeled samples: ' + str(active_samples) + 'in env ' + str(env.datasetidx)
-
-            # One step in the environment
-            for ids in dict.keys():
-                env.reset_to(ids)
-                print 'Training on ' + str(ids)
-                for samples in dict[ids]:
-                    env.timeseries_curser = samples + n_steps
-                    # 3.1 Some Preprocess
-                    # Epsilon for this time step
-                    epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
-
-                    state = env.states_list[samples]
-
-                    # 3.2 The main work
-                    # Choose an action to take
-                    action_probs = policy(state, epsilon)
-                    action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-                    # Take a step
-                    if env.timeseries['labeled'][env.timeseries_curser] == 0:
-                        env.timeseries['labeled'][env.timeseries_curser] = 1
-                        num_label += 1
-
-                    next_state, reward, done, _ = env.step(action)
-
-                    # 3.3 Control replay memory
-                    if len(replay_memory) == replay_memory_size:
-                        replay_memory.pop(0)
-
-                    replay_memory.append(Transition(state, reward, next_state, done))
-            print 'num_label: ' + str(num_label)
-
-            env.datasetidx = ori_idx
-        else:
-            # One step in the environment
-            for t in itertools.count():
-                # 3.1 Some Preprocess
-                # Epsilon for this time step
-                epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
-
-                # 3.2 The main work
-                # Choose an action to take
-
-                action_probs = policy(state, epsilon)
-                action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-                # Take a step
-                next_state, reward, done, _ = env.step(action)
-
-                # 3.3 Control replay memory
-                if len(replay_memory) == replay_memory_size:
-                    replay_memory.pop(0)
-
-                # if the sample for this step is unlabeled, skip
-                if env.timeseries['labeled'][env.timeseries_curser] != 0:
-                    replay_memory.append(Transition(state, reward, next_state, done))
-                    print 'memory stored'
-                else:
-                    print 'unlabeled -> skip'
-
-                if done:
-                    break
-
-                state = next_state[action]
-        '''
         per_loop_time2 = time.time()
-
-        # Update the model
         for i_epoch in range(num_epoches):
-            # Add epsilon to Tensorboard
             if qlearn_estimator.summary_writer:
                 episode_summary = tf.compat.v1.Summary()
                 qlearn_estimator.summary_writer.add_summary(episode_summary, total_t)
-
-            # Update the target estimator
             if total_t % update_target_estimator_every == 0:
                 copy_model_parameters(sess, qlearn_estimator, target_estimator)
                 print("\nCopied model parameters to target network.\n")
-
-            # Sample a minibatch from the replay memory
             samples = random.sample(replay_memory, batch_size)
             states_batch, reward_batch, next_states_batch, done_batch = map(np.array, zip(*samples))
-
             if discount_factor > 0:
-                # Calculate q values and targets
                 next_states_batch = np.squeeze(np.split(next_states_batch, 2, axis=1))
                 next_states_batch0 = next_states_batch[0]
                 next_states_batch1 = next_states_batch[1]
-
                 q_values_next0 = target_estimator.predict(state=next_states_batch0)
                 q_values_next1 = target_estimator.predict(state=next_states_batch1)
-
                 targets_batch = reward_batch + (discount_factor *
                                                 np.stack((np.amax(q_values_next0, axis=1),
                                                           np.amax(q_values_next1, axis=1)),
                                                          axis=-1))
             else:
                 targets_batch = reward_batch
-
-            # Perform gradient descent update
             qlearn_estimator.update(state=states_batch, target=targets_batch.astype(np.float32))
-
             total_t += 1
-
-        # Print out which step we're on, useful for debugging.
         per_loop_time_popu = per_loop_time2 - per_loop_time1
         per_loop_time_updt = time.time() - per_loop_time2
-        print("Global step {} @ Episode {}/{}, time: {} + {}"
-              .format(total_t, i_episode + 1, num_episodes, per_loop_time_popu, per_loop_time_updt))
+        print("Global step {} @ Episode {}/{}, time: {} + {}".format(total_t, i_episode + 1, num_episodes, per_loop_time_popu, per_loop_time_updt))
     return
 
-
 def evaluate_model(y_true, y_pred):
-    """
-    Compute various classification metrics.
-
-    Args:
-    - y_true: Ground truth labels (0 = Normal, 1 = Anomaly)
-    - y_pred: Predicted labels (0 = Normal, 1 = Anomaly)
-
-    Returns:
-    - Dictionary with evaluation metrics.
-    """
-    # Compute confusion matrix
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-
-    # Compute existing metrics
     precision = precision_score(y_true, y_pred, zero_division=1)
     recall = recall_score(y_true, y_pred, zero_division=1)
     f1 = f1_score(y_true, y_pred, zero_division=1)
-
-    # Compute new metrics
-    mcc = matthews_corrcoef(y_true, y_pred)  # Matthews Correlation Coefficient
-    balanced_acc = (recall + (tn / (tn + fp))) / 2  # Balanced Accuracy
-    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
-    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0  # False Negative Rate
-
+    mcc = matthews_corrcoef(y_true, y_pred)
+    balanced_acc = (recall + (tn / (tn + fp))) / 2
+    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+    fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
     return {
         "Precision": precision,
         "Recall": recall,
@@ -856,171 +445,31 @@ def evaluate_model(y_true, y_pred):
         "FNR": fnr
     }
 
-
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
-    """
-    Validate the trained model using multiple evaluation metrics.
-
-    Args:
-        env: Environment.
-        estimator: Trained model.
-        num_episodes: Number of validation episodes.
-
-    Returns:
-        Dictionary with averaged evaluation metrics.
-    """
     y_true_all = []
     y_pred_all = []
-
     for i_episode in range(num_episodes):
-        state_rec = []
-        action_rec = []
-
         policy = make_epsilon_greedy_policy(estimator, env.action_space_n)
         state = env.reset()
         while env.datasetidx < env.datasetrng * validation_separate_ratio:
             state = env.reset()
-
         for t in itertools.count():
-            action_probs = policy(state, 0)  # Use greedy policy
+            action_probs = policy(state, 0)
             action = np.argmax(action_probs)
-
-            y_true_all.append(env.timeseries['anomaly'][env.timeseries_curser])  # True label
-            y_pred_all.append(action)  # Predicted label
-
+            y_true_all.append(env.timeseries['anomaly'][env.timeseries_curser])
+            y_pred_all.append(action)
             next_state, reward, done, _ = env.step(action)
             if done:
                 break
             state = next_state[action]
-
-    # Compute evaluation metrics
     results = evaluate_model(y_true_all, y_pred_all)
-
-    # Print metrics
     for metric, value in results.items():
         print(f"{metric}: {value:.4f}")
-
     return results
 
-
-'''
-def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
-    """
-    With 1) the trained estimator of Q(s,a) action-value function, i.e., estimator
-         2) the known environment, i.e., environment
-
-    Test the validity of the estimator in the application of time series anomaly detection.
-
-    Args:
-        env: The environment.
-        estimator: Action-Value function estimator
-        num_episodes: Number of episodes to run for.
-
-    Returns:
-        Statistics
-    """
-    rec_file = open(record_dir + 'performance.txt', 'w')
-    # rec_writer = csv.writer(rec_file)
-
-    p_overall = 0
-    recall_overall = 0
-    f1_overall = 0
-    reward_overall = 0
-    for i_episode in range(num_episodes):
-        print("Episode {}/{}".format(i_episode + 1, num_episodes))
-
-        state_rec = []
-        action_rec = []
-        reward_rec = []
-
-        # The policy we're following
-        policy = make_epsilon_greedy_policy(
-            estimator, env.action_space_n)
-
-        # Reset the environment and pick the first action
-        state = env.reset()
-        while env.datasetidx < env.datasetrng * validation_separate_ratio:
-            print('double reset')
-            state = env.reset()
-
-        print('testing on: ' + str(env.repodirext[env.datasetidx]))
-        # One step in the environment
-        for t in itertools.count():
-            # Choose an action to take
-            action_probs = policy(state, 0)
-            action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-
-            # Take a step
-            next_state, reward, done, _ = env.step(action)
-
-            # Record the statistics
-            state_rec.append(state[len(state) - 1][0])
-            action_rec.append(action)
-            reward_rec.append(reward[action])
-
-            if done:
-                break
-
-            state = next_state[action]
-
-        # Search over reward_rec to correct the rewards
-        # 1) If FN happend within a small range of TP (miss alarm very closer to reported anomaly), correct it
-        # 2) If FP happend within a small range of TP (false alarm very close to the reported anomaly), correct it
-
-        RNG = 5
-        for i in range(len(reward_rec)):
-            if reward_rec[i] < 0:
-                low_range = max(0, i - RNG)
-                up_range = min(i + RNG + 1, len(reward_rec))
-                r = reward_rec[low_range:up_range]
-                if r.count(TP_Value) > 0:
-                    reward_rec[i] = -reward_rec[i]
-
-        # Plot the result for each episode
-        if plot:
-            f, axarr = plt.subplots(3, sharex=True)
-            axarr[0].plot(state_rec)
-            axarr[0].set_title('Time Series')
-            axarr[1].plot(action_rec, color='g')
-            axarr[1].set_title('Action')
-            axarr[2].plot(reward_rec, color='r')
-            axarr[2].set_title('Reward')
-            plt.show()
-            # plt.savefig("/home/lfwutong/sbsplusplus/graphs/Aniyama-dataport/"+str(i_episode)+".png")
-            # plt.savefig("/Users/wuxiaodong/Dropbox/adaptive-anomalies/graphs/Aniyama-dataport/"+str(i_episode)+".png")
-
-        # Calculate the accuracy F1-score = 2*((precison*recall)/(precison+recall))
-        # precision = tp / (tp+fp)
-        # recall = tp / (tp+fn)
-
-        tp = reward_rec.count(TP_Value)
-        fp = reward_rec.count(FP_Value)
-        fn = reward_rec.count(FN_Value)
-        precision = (tp + 1) / float(tp + fp + 1)
-        recall = (tp + 1) / float(tp + fn + 1)
-        f1 = 2 * ((precision * recall) / (precision + recall))
-
-        p_overall += precision
-        recall_overall += recall
-        f1_overall += f1
-        reward_overall += np.array(reward_rec).sum()
-
-        # if record_dir:
-        # rec_writer.writerow([f1])
-
-        # print("Precision:{}, Recall:{}, F1-score:{} (f1 wrote to file)".format(precision, recall, f1))
-    # print 'Overall performance: '
-    print("Precision:{}, Recall:{}, F1-score:{} ".
-          format(p_overall / num_episodes, recall_overall / num_episodes, f1_overall / num_episodes))
-    rec_file.write("Precision:{}, Recall:{}, F1-score:{} ".
-                   format(p_overall / num_episodes, recall_overall / num_episodes, f1_overall / num_episodes))
-    print('reward: ' + str(reward_overall))
-    if record_dir:
-        rec_file.close()
-
-    return f1_overall / num_episodes
-'''
-
+# ----------------------------------------------------------------
+# Active Learning and Warm-Up helper classes
+# ----------------------------------------------------------------
 
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
@@ -1076,12 +525,11 @@ class active_learning(object):
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = label
         return
 
-
 class WarmUp(object):
     def warm_up_SVM(self, outliers_fraction, N):
         states_list = self.env.get_states_list()
         data = np.array(states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        model = OneClassSVM(gamma='auto', nu=0.95 * outliers_fraction)  # nu=0.95 * outliers_fraction  + 0.05
+        model = OneClassSVM(gamma='auto', nu=0.95 * outliers_fraction)
         model.fit(data)
         distances = model.decision_function(data)
         if len(distances.shape) < 2:
@@ -1100,75 +548,54 @@ class WarmUp(object):
         clf.fit(data)
         return clf
 
-
-import os
-import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-
+# ----------------------------------------------------------------
+# Train function that sets up the environment and runs training.
+# ----------------------------------------------------------------
 
 def train(num_LP, num_AL, discount_factor, learn_tau=True):
     """
     Train the RL agent with learned tau using DRO.
-
-    Args:
-    - num_LP: Number of Label Propagation samples.
-    - num_AL: Number of Active Learning samples.
-    - discount_factor: Discount factor for RL.
-    - learn_tau: Whether to learn tau dynamically using DRO.
-
-    Returns:
-    - Optimization metric (e.g., F1-score).
     """
-    original_dim = 3  # Number of features in data
+    # VAE parameters
+    original_dim = 3  # number of features
     latent_dim = 10
     intermediate_dim = 64
 
-    # Load the dataset
-    data_directory = r'C:\Users\Asus\Documents\PSU-Course\sbsplusplus-master\normal-data'
-    x_train = load_normal_data(data_directory)
+    # Load dataset from relative path
+    x_train = load_normal_data(normal_data_directory)
 
-    # Train a Variational Autoencoder (VAE)
+    # Train the VAE
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=50, batch_size=32)
     vae.save('vae_model.h5')
-
-    # Load pretrained VAE
     vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
 
+    # Experiment and dataset directories (relative paths)
     exp_relative_dir = ['RLVAL with DRO and Adaptive Scaling']
-    dataset_dir = ['C:/Users/Asus/Documents/PSU-Course/ydata-labeled-time-series-anomalies-v1_0/A1Benchmark']
+    dataset_dirs = [anomaly_data_directory]
 
-    for i in range(len(dataset_dir)):
-        env = EnvTimeSeriesfromRepo(dataset_dir[i])
+    for i in range(len(dataset_dirs)):
+        env = EnvTimeSeriesfromRepo(dataset_dirs[i])
         env.statefnc = RNNBinaryStateFuc
-
         if learn_tau:
             env.rewardfnc = lambda timeseries, timeseries_curser, action: RNNBinaryRewardFuc(
                 timeseries, timeseries_curser, action, vae
             )
         else:
             env.rewardfnc = RNNBinaryRewardFuc  # Without adaptive tau
-
         env.timeseries_curser_init = n_steps
         env.datasetfix = DATAFIXED
         env.datasetidx = 0
-
         # Testing environment
         env_test = env
         env_test.rewardfnc = RNNBinaryRewardFucTest
-
-        experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[i]))
-
+        experiment_dir = os.path.abspath(os.path.join(current_dir, 'exp', exp_relative_dir[i]))
         tf.compat.v1.reset_default_graph()
         global_step = tf.Variable(0, name="global_step", trainable=False)
-
         qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
         target_estimator = Q_Estimator_Nonlinear(scope="target")
-
         sess = tf.compat.v1.Session()
         sess.run(tf.compat.v1.global_variables_initializer())
-
         with sess.as_default():
             q_learning(env,
                        sess=sess,
@@ -1195,7 +622,6 @@ def train(num_LP, num_AL, discount_factor, learn_tau=True):
                                                        experiment_dir)
         return optimization_metric
 
-
 def plot_tau_evolution():
     plt.figure(figsize=(10, 5))
     plt.plot(tau_values, label="Tau over time", alpha=0.8)
@@ -1205,26 +631,14 @@ def plot_tau_evolution():
     plt.legend()
     plt.show()
 
+# ----------------------------------------------------------------
+# Run training and plot tau evolution.
+# ----------------------------------------------------------------
 
 plot_tau_evolution()
 
-# Run training with learned tau
+# Example training runs with different parameters
 train(100, 30, 0.92, learn_tau=True)
 train(150, 50, 0.94, learn_tau=True)
 train(200, 100, 0.96, learn_tau=True)
 
-# train(100, 30, 1.0)
-# train(100, 50, 1.0)
-# train(100, 100, 1.0)
-
-# train(100, 30, 0.99)
-# train(150, 50, 0.95)
-# train(200, 100, 0.9)
-
-# train(100, 30, 0.97)
-# train(150, 50, 0.92)
-# train(200, 100, 0.88)
-
-# train(100, 30, 0.92)  # Adjusting the discount factor
-# train(150, 50, 0.94)  # Adjusting the discount factor
-# train(200, 100, 0.96)  # Adjusting the discount factor
