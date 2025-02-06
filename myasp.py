@@ -89,14 +89,13 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')(h)
     z_mean = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
     z_log_var = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
-    # Clip z_log_var to prevent numerical issues.
+    # Clip z_log_var to avoid extreme values.
     z_log_var = tf.clip_by_value(z_log_var, -10.0, 10.0)
     z = Sampling()([z_mean, z_log_var])
 
     # Decoder
     decoder_h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')
     h_decoded = decoder_h(z)
-    # Use 'sigmoid' if your data is in [0, 1] or consider 'linear' if using MSE.
     decoder_mean = layers.Dense(original_dim, activation='sigmoid')
     x_decoded_mean = decoder_mean(h_decoded)
 
@@ -104,19 +103,17 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     encoder = models.Model(inputs, [z_mean, z_log_var, z])
     vae = models.Model(inputs, x_decoded_mean)
 
-    # Reconstruction loss: try mean squared error if your data is continuous.
+    # Reconstruction loss: use mean squared error for continuous data.
     reconstruction_loss = losses.mse(inputs, x_decoded_mean) * original_dim
-    # Alternatively, you can switch back to binary crossentropy if your data is strictly in [0,1]:
-    # reconstruction_loss = losses.binary_crossentropy(inputs, x_decoded_mean) * original_dim
-
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
     vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
     vae.add_loss(vae_loss)
 
-    # Use an optimizer with gradient clipping.
-    optimizer = optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
+    # Use the legacy Adam optimizer to avoid the get_updates error.
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=0.001, clipnorm=1.0)
     vae.compile(optimizer=optimizer)
     return vae, encoder
+
 
 # VAE parameters.
 original_dim = 3  # Adjust based on your input features.
