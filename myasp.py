@@ -73,7 +73,7 @@ data_directory = os.path.join(current_dir, "normal-data")
 x_train = load_normal_data(data_directory)
 
 class Sampling(layers.Layer):
-    """Uses (z_mean, z_log_var) to sample z."""
+    """Uses (z_mean, z_log_var) to sample z, the latent vector."""
     def call(self, inputs):
         z_mean, z_log_var = inputs
         batch = tf.shape(z_mean)[0]
@@ -82,29 +82,40 @@ class Sampling(layers.Layer):
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
+    # Encoder
     inputs = layers.Input(shape=(original_dim,))
-    h = layers.Dense(intermediate_dim, activation='relu')(inputs)
-    h = layers.Dense(intermediate_dim, activation='relu')(h)
-    h = layers.Dense(intermediate_dim, activation='relu')(h)
-    z_mean = layers.Dense(latent_dim)(h)
-    z_log_var = layers.Dense(latent_dim)(h)
+    h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')(inputs)
+    h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')(h)
+    h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')(h)
+    z_mean = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
+    z_log_var = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
+    # Clip z_log_var to prevent numerical issues.
+    z_log_var = tf.clip_by_value(z_log_var, -10.0, 10.0)
     z = Sampling()([z_mean, z_log_var])
 
-    decoder_h = layers.Dense(intermediate_dim, activation='relu')
-    decoder_h = layers.Dense(intermediate_dim, activation='relu')
-    decoder_h = layers.Dense(intermediate_dim, activation='relu')
-    decoder_mean = layers.Dense(original_dim, activation='sigmoid')
+    # Decoder
+    decoder_h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')
     h_decoded = decoder_h(z)
+    # Use 'sigmoid' if your data is in [0, 1] or consider 'linear' if using MSE.
+    decoder_mean = layers.Dense(original_dim, activation='sigmoid')
     x_decoded_mean = decoder_mean(h_decoded)
 
+    # Models
     encoder = models.Model(inputs, [z_mean, z_log_var, z])
     vae = models.Model(inputs, x_decoded_mean)
 
-    reconstruction_loss = losses.binary_crossentropy(inputs, x_decoded_mean) * original_dim
+    # Reconstruction loss: try mean squared error if your data is continuous.
+    reconstruction_loss = losses.mse(inputs, x_decoded_mean) * original_dim
+    # Alternatively, you can switch back to binary crossentropy if your data is strictly in [0,1]:
+    # reconstruction_loss = losses.binary_crossentropy(inputs, x_decoded_mean) * original_dim
+
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
     vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
     vae.add_loss(vae_loss)
-    vae.compile(optimizer='adam')
+
+    # Use an optimizer with gradient clipping.
+    optimizer = optimizers.Adam(learning_rate=0.001, clipnorm=1.0)
+    vae.compile(optimizer=optimizer)
     return vae, encoder
 
 # VAE parameters.
