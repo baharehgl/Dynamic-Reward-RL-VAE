@@ -116,7 +116,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
 
 
 # VAE parameters.
-original_dim = 3  # Adjust based on your input features.
+original_dim = n_steps  
 latent_dim = 10
 intermediate_dim = 64
 
