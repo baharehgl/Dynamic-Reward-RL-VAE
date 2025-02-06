@@ -559,7 +559,7 @@ def train(num_LP, num_AL, discount_factor):
         exp_relative_dir = ['A1_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) + '_num_AL' + str(num_AL) +
                             '_d' + str(discount_factor)]
         # Use a subfolder "A1Benchmark" in the code directory.
-        dataset_dir = [os.path.join(current_dir, "A1Benchmark")]
+        dataset_dir = [os.path.join(current_dir, "ydata-labeled-time-series-anomalies-v1_0", "A1Benchmark")]
         for i in range(len(dataset_dir)):
             env = EnvTimeSeriesfromRepo(dataset_dir[i])
             env.statefnc = RNNBinaryStateFuc
