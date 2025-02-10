@@ -33,7 +33,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
-DATAFIXED = 0  # whether target at a single time series dataset
+DATAFIXED = 0  # whether target is fixed to a single time series
 EPISODES = 500  # number of episodes for training
 DISCOUNT_FACTOR = 0.5  # reward discount factor [0,1]
 EPSILON = 0.5  # epsilon-greedy parameter for action selection
@@ -44,7 +44,7 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # sliding window length
+n_steps = 25  # sliding window length (for state construction)
 n_input_dim = 2  # input dimension to LSTM
 n_hidden_dim = 128  # hidden dimension
 
@@ -68,7 +68,7 @@ def load_normal_data(data_path, n_steps):
     for file in all_files:
         df = pd.read_csv(file)
         if 'value' not in df.columns:
-            continue  # skip files without required column
+            continue
         values = df['value'].values
         if len(values) >= n_steps:
             for i in range(len(values) - n_steps + 1):
@@ -142,7 +142,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
 
 
-# --- Modified Reward Function ---
+# Modified reward function: if label is not 0 or 1, return a neutral reward.
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
@@ -154,7 +154,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         elif timeseries['label'][timeseries_curser] == 1:
             return [FN_Value + vae_penalty, TP_Value + vae_penalty]
         else:
-            # If label is not 0 or 1 (for example still -1), return a neutral reward.
             return [0, 0]
     else:
         return [0, 0]
@@ -171,7 +170,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
 
 
 # ----------------------------
-# Q-value Function Approximator using a TensorFlow RNN.
+# Q-value Function Approximator (RNN).
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -196,7 +195,7 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            # Use the global step variable from the collection.
+            # Retrieve global_step from collection.
             global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[
                 0]
             self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
@@ -341,6 +340,11 @@ def q_learning(env,
 
     dynamic_coef = 10.0
 
+    # --- Convert labeled indices (from full timeseries) to indices into states_list.
+    labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
+    labeled_index = [i - n_steps for i in labeled_index if i >= n_steps and (i - n_steps) < len(env.states_list)]
+    # --- End conversion
+
     for i_episode in range(num_episodes):
         env.rewardfnc = lambda timeseries, timeseries_curser, action: \
             RNNBinaryRewardFuc(timeseries, timeseries_curser, action, vae_model, dynamic_coef=dynamic_coef)
@@ -355,8 +359,7 @@ def q_learning(env,
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
             print('double reset')
-        labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
-        labeled_index = [item for item in labeled_index if item >= n_steps]
+        # Extend labeled_index with active learning samples (these are already indices into states_list).
         al = active_learning(env=env, N=num_active_learning, strategy='margin_sampling',
                              estimator=qlearn_estimator, already_selected=labeled_index)
         al_samples = al.get_samples()
@@ -607,7 +610,7 @@ def train(num_LP, num_AL, discount_factor):
             sess = tf.compat.v1.Session()
             from tensorflow.compat.v1.keras import backend as K
             K.set_session(sess)
-            # Create global_step before initializing.
+            # Create global_step before initialization.
             global_step = tf.Variable(0, name="global_step", trainable=False)
             qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
             target_estimator = Q_Estimator_Nonlinear(scope="target")
@@ -640,6 +643,6 @@ def train(num_LP, num_AL, discount_factor):
             return optimization_metric
 
 
-train(100, 30, 0.92)  # Example call with specific parameters.
+train(100, 30, 0.92)  
 train(150, 50, 0.94)
 train(200, 100, 0.96)
