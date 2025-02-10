@@ -600,11 +600,11 @@ def train(num_LP, num_AL, discount_factor):
 
             # --- NEW: Reset the default graph and re-load the VAE ---
             tf.compat.v1.reset_default_graph()
-            # Re-load the VAE into the new graph.
             vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
-            # Create a new session and set it as the Keras session.
             sess = tf.compat.v1.Session()
-            tf.keras.backend.set_session(sess)
+            # Instead of tf.keras.backend.set_session, use the TF1 compat Keras backend.
+            from tensorflow.compat.v1.keras import backend as K
+            K.set_session(sess)
             sess.run(tf.compat.v1.global_variables_initializer())
             # ---------------------------------------------------------
 
