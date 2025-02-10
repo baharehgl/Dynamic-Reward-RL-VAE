@@ -68,7 +68,7 @@ def load_normal_data(data_path, n_steps):
     for file in all_files:
         df = pd.read_csv(file)
         if 'value' not in df.columns:
-            continue
+            continue  # skip files without required column
         values = df['value'].values
         if len(values) >= n_steps:
             for i in range(len(values) - n_steps + 1):
@@ -127,6 +127,7 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 #####################################################
 # State and Reward Functions.
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
+    # This function returns a valid state only when timeseries_curser >= n_steps.
     if timeseries_curser == n_steps:
         state = []
         for i in range(timeseries_curser):
@@ -140,6 +141,8 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         state1 = np.concatenate((previous_state[1:n_steps],
                                  [[timeseries['value'][timeseries_curser], 1]]))
         return np.array([state0, state1], dtype='float32')
+    # For cursors less than n_steps, return None.
+    return None
 
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
@@ -162,10 +165,9 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
             return [TN_Value, FP_Value]
-        if timeseries['anomaly'][timeseries_curser] == 1:
+        elif timeseries['anomaly'][timeseries_curser] == 1:
             return [FN_Value, TP_Value]
-    else:
-        return [0, 0]
+    return [0, 0]
 
 
 # ----------------------------
@@ -194,7 +196,7 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            # Retrieve global_step from collection.
+            # Retrieve the global_step variable from the collection.
             global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[
                 0]
             self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
@@ -250,7 +252,7 @@ def make_epsilon_greedy_policy(estimator, nA):
 
 
 def update_dynamic_coef(current_coef, episode_reward, target_reward=0.0,
-                        increase_factor=1.05, decrease_factor=0.95, min_coef=0.1, max_coef=20.0):
+                        increase_factor=1.05, decrease_factor=1.0, min_coef=0.1, max_coef=20.0):
     if episode_reward < target_reward:
         new_coef = current_coef * increase_factor
     else:
@@ -268,6 +270,7 @@ class active_learning(object):
         self.already_selected = already_selected
 
     def get_samples(self):
+        # Use only valid indices (the filtered env.states_list)
         states_list = self.env.states_list
         distances = []
         for state in states_list:
@@ -275,14 +278,14 @@ class active_learning(object):
             distance = abs(q[0] - q[1])
             distances.append(distance)
         distances = np.array(distances)
-        if len(distances.shape) < 2:
+        if distances.ndim < 2:
             min_margin = abs(distances)
         else:
             sort_distances = np.sort(distances, axis=1)[:, -2:]
             min_margin = sort_distances[:, 1] - sort_distances[:, 0]
         rank_ind = np.argsort(min_margin)
-        # Filter out indices that are out of range or already selected.
-        rank_ind = [i for i in rank_ind if i < len(states_list) and i not in self.already_selected]
+        # Filter out any indices already selected.
+        rank_ind = [i for i in rank_ind if i not in self.already_selected]
         active_samples = rank_ind[0:self.N]
         return active_samples
 
@@ -294,13 +297,13 @@ class active_learning(object):
             distance = abs(q[0] - q[1])
             distances.append(distance)
         distances = np.array(distances)
-        if len(distances.shape) < 2:
+        if distances.ndim < 2:
             min_margin = abs(distances)
         else:
             sort_distances = np.sort(distances, axis=1)[:, -2:]
             min_margin = sort_distances[:, 1] - sort_distances[:, 0]
         rank_ind = np.argsort(min_margin)
-        rank_ind = [i for i in rank_ind if i < len(states_list) and i not in self.already_selected]
+        rank_ind = [i for i in rank_ind if i not in self.already_selected]
         active_samples = [t for t in rank_ind if distances[t] < threshold]
         return active_samples
 
@@ -322,7 +325,7 @@ class WarmUp(object):
         model = OneClassSVM(gamma='auto', nu=0.95 * outliers_fraction)
         model.fit(data)
         distances = model.decision_function(data)
-        if len(distances.shape) < 2:
+        if distances.ndim < 2:
             min_margin = abs(distances)
         else:
             sort_distances = np.sort(distances, axis=1)[:, -2:]
@@ -389,44 +392,52 @@ def q_learning(env,
     lp_model = LabelSpreading()
     for t in itertools.count():
         env.reset()
+        # Filter out None states.
+        env.states_list = [s for s in env.states_list if s is not None]
         data = np.array(env.states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
         anomaly_score = model.decision_function(data)
         pred_score = [-1 * s + 0.5 for s in anomaly_score]
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
         state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
-        label_list = [-1] * len(state_list)
+        # Compute labeled indices from the full timeseries and convert to states_list indices.
+        labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries['label'])) if
+                         env.timeseries['label'][i] != -1]
         for sample in warm_samples:
-            state = env.states_list[sample]
-            env.timeseries_curser = sample + n_steps
-            action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
-            action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-            env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
-            num_label += 1
-            label_list[sample] = int(env.timeseries['anomaly'][env.timeseries_curser])
-            next_state, reward, done, _ = env.step(action)
-            replay_memory.append(Transition(state, reward, next_state, done))
-        unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
+            if sample < len(env.states_list):
+                state = env.states_list[sample]
+                env.timeseries_curser = sample + n_steps
+                action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
+                action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+                env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
+                num_label += 1
+                # Also update labeled_index.
+                labeled_index.append(sample)
+                next_state, reward, done, _ = env.step(action)
+                replay_memory.append(Transition(state, reward, next_state, done))
+        label_list = []
+        # Build label_list for valid states:
+        for i in range(n_steps, len(env.timeseries['label'])):
+            label_list.append(env.timeseries['label'][i])
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
-        certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
+        # Filter indices to those not already in labeled_index.
+        certainty_index = [i for i in certainty_index if i not in labeled_index]
+        certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
+            # Here, index in state_list corresponds to full timeseries index index+n_steps.
             env.timeseries['label'][index + n_steps] = pseudo_label
         if len(replay_memory) >= replay_memory_init_size:
             break
 
     dynamic_coef = 10.0
 
-    # Convert labeled indices (from full timeseries) to indices into states_list.
-    labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
-    labeled_index = [i - n_steps for i in labeled_index if i >= n_steps and (i - n_steps) < len(env.states_list)]
-
     for i_episode in range(num_episodes):
-        env.rewardfnc = lambda timeseries, timeseries_curser, action: \
-            RNNBinaryRewardFuc(timeseries, timeseries_curser, action, vae_model, dynamic_coef=dynamic_coef)
+        env.rewardfnc = lambda timeseries, timeseries_curser, action: RNNBinaryRewardFuc(
+            timeseries, timeseries_curser, action, vae_model, dynamic_coef=dynamic_coef)
         episode_reward = 0.0
 
         if i_episode % 50 == 49:
@@ -435,9 +446,15 @@ def q_learning(env,
 
         per_loop_time1 = time.time()
         state = env.reset()
+        env.states_list = [s for s in env.states_list if s is not None]
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
+            env.states_list = [s for s in env.states_list if s is not None]
             print('double reset')
+        # Get labeled indices from the full timeseries and convert:
+        labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries['label'])) if
+                         env.timeseries['label'][i] != -1]
+        # Active learning:
         al = active_learning(env=env, N=num_active_learning, strategy='margin_sampling',
                              estimator=qlearn_estimator, already_selected=labeled_index)
         al_samples = al.get_samples()
@@ -445,27 +462,31 @@ def q_learning(env,
         labeled_index.extend(al_samples)
         num_label += len(al_samples)
         state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
-        label_list = np.array(env.timeseries['label'][n_steps:])
+        # Build label_list for valid states.
+        label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
+        label_list = np.array(label_list)
         for new_sample in al_samples:
-            label_list[new_sample] = env.timeseries['anomaly'][n_steps + new_sample]
-            env.timeseries['label'][n_steps + new_sample] = env.timeseries['anomaly'][n_steps + new_sample]
+            label_list[new_sample] = env.timeseries['anomaly'][new_sample + n_steps]
+            env.timeseries['label'][new_sample + n_steps] = env.timeseries['anomaly'][new_sample + n_steps]
         for sample in labeled_index:
-            env.timeseries_curser = sample + n_steps
-            epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
-            state = env.states_list[sample]
-            action_probs = policy(state, epsilon)
-            action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-            next_state, reward, done, _ = env.step(action)
-            episode_reward += reward[action]
-            if len(replay_memory) == replay_memory_size:
-                replay_memory.pop(0)
-            replay_memory.append(Transition(state, reward, next_state, done))
+            if sample < len(env.states_list):
+                env.timeseries_curser = sample + n_steps
+                epsilon = epsilons[min(total_t, epsilon_decay_steps - 1)]
+                state = env.states_list[sample]
+                action_probs = policy(state, epsilon)
+                action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+                next_state, reward, done, _ = env.step(action)
+                episode_reward += reward[action]
+                if len(replay_memory) == replay_memory_size:
+                    replay_memory.pop(0)
+                replay_memory.append(Transition(state, reward, next_state, done))
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
-        certainty_index = certainty_index[np.in1d(certainty_index, unlabeled_indices)][:num_LabelPropagation]
+        certainty_index = [i for i in certainty_index if i in unlabeled_indices]
+        certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
             env.timeseries['label'][index + n_steps] = pseudo_label
@@ -516,9 +537,11 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
         reward_rec = []
         policy = make_epsilon_greedy_policy(estimator, env.action_space_n)
         state = env.reset()
+        env.states_list = [s for s in env.states_list if s is not None]
         while env.datasetidx < env.datasetrng * validation_separate_ratio:
-            print('double reset')
             state = env.reset()
+            env.states_list = [s for s in env.states_list if s is not None]
+            print('double reset')
         print('testing on: ' + str(env.repodirext[env.datasetidx]))
         for t in itertools.count():
             action_probs = policy(state, 0)
@@ -641,6 +664,6 @@ def train(num_LP, num_AL, discount_factor):
             return optimization_metric
 
 
-train(100, 30, 0.92)  
+train(100, 30, 0.92)  # Example call with specific parameters.
 train(150, 50, 0.94)
 train(200, 100, 0.96)
