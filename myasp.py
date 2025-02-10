@@ -252,7 +252,7 @@ def make_epsilon_greedy_policy(estimator, nA):
 
 
 def update_dynamic_coef(current_coef, episode_reward, target_reward=0.0,
-                        increase_factor=1.05, decrease_factor=1.0, min_coef=0.1, max_coef=20.0):
+                        increase_factor=1.05, decrease_factor=1.0, min_coef=0.1, max_coef=10.0):
     if episode_reward < target_reward:
         new_coef = current_coef * increase_factor
     else:
