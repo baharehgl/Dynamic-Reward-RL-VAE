@@ -31,12 +31,13 @@ from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
-# Macros for running Q-learning.
-DATAFIXED = 0  # whether target at a single time series dataset
-EPISODES = 500  # number of episodes for training
-DISCOUNT_FACTOR = 0.5  # reward discount factor [0,1]
-EPSILON = 0.5  # epsilon-greedy parameter for action selection
-EPSILON_DECAY = 1.00  # epsilon-greedy decay parameter
+############################
+# Macros and hyperparameters.
+DATAFIXED = 0             # whether target at a single time series dataset
+EPISODES = 500            # number of episodes for training
+DISCOUNT_FACTOR = 0.5     # reward discount factor [0,1]
+EPSILON = 0.5             # epsilon-greedy parameter for action selection
+EPSILON_DECAY = 1.00      # epsilon-greedy decay parameter
 
 NOT_ANOMALY = 0
 ANOMALY = 1
@@ -56,21 +57,28 @@ FN_Value = -5
 validation_separate_ratio = 0.9
 
 ########################### VAE Setup #####################
-def load_normal_data(data_path):
+def load_normal_data(data_path, n_steps):
     """
-    Loads all CSV files from the specified directory (assumed to be in your code directory)
-    and returns a scaled concatenated numpy array.
+    Loads all CSV files from the specified directory (assumed to be in your code directory),
+    extracts the 'value' column, constructs sliding windows of length n_steps,
+    scales them using StandardScaler, and returns the resulting numpy array.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
-    data_list = [pd.read_csv(file) for file in all_files]
-    data = pd.concat(data_list, axis=0, ignore_index=True)
+    windows = []
+    for file in all_files:
+        df = pd.read_csv(file)
+        if 'value' not in df.columns:
+            continue  # skip files without the required column
+        values = df['value'].values
+        # Only create windows if there are enough data points.
+        if len(values) >= n_steps:
+            for i in range(len(values) - n_steps + 1):
+                window = values[i:i+n_steps]
+                windows.append(window)
+    windows = np.array(windows)
     scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(data.values)
-    return scaled_data
-
-# Use a subfolder "normal-data" in the code directory.
-data_directory = os.path.join(current_dir, "normal-data")
-x_train = load_normal_data(data_directory)
+    scaled_windows = scaler.fit_transform(windows)
+    return scaled_windows
 
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the latent vector."""
@@ -114,9 +122,8 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-
 # VAE parameters.
-original_dim = n_steps  
+original_dim = n_steps
 latent_dim = 10
 intermediate_dim = 64
 
@@ -294,6 +301,8 @@ def q_learning(env,
     for num in range(env.datasetsize):
         env.reset()
         data_train.extend(env.states_list)
+    # Build a warm-up model using the IsolationForest on the sliding windows.
+    # Here we assume that x_train (built from normal-data) is in the same format as your state windows.
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
     for t in itertools.count():
@@ -539,7 +548,9 @@ class WarmUp(object):
         return samples
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
-        data = np.array(X_train).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
+        # Here, X_train is assumed to be an array of sliding windows of shape (num_samples, n_steps).
+        # We extract the last value of each window to mimic how the reward function uses the window.
+        data = X_train[:, -1].reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
@@ -547,7 +558,8 @@ class WarmUp(object):
 def train(num_LP, num_AL, discount_factor):
     # Use CSV files in the "normal-data" subfolder relative to the code directory.
     data_directory = os.path.join(current_dir, "normal-data")
-    x_train = load_normal_data(data_directory)
+    # Build sliding windows from the 'value' column so that each sample is of length n_steps.
+    x_train = load_normal_data(data_directory, n_steps)
     # Train the VAE.
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=50, batch_size=32)
