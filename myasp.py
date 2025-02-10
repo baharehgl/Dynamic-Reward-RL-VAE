@@ -20,11 +20,11 @@ from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
 
-# Append the current directory to sys.path so local modules can be imported.
+# Append current directory to sys.path so local modules can be imported.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment (ensure that env.py is in your code directory).
+# Import the environment.
 from env import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -44,9 +44,9 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # sliding window length for state construction.
-n_input_dim = 2  # input dimension for the LSTM.
-n_hidden_dim = 128  # hidden dimension for the LSTM.
+n_steps = 25  # sliding window length
+n_input_dim = 2  # input dimension to LSTM
+n_hidden_dim = 128  # hidden dimension
 
 # Reward values.
 TP_Value = 5
@@ -68,7 +68,7 @@ def load_normal_data(data_path, n_steps):
     for file in all_files:
         df = pd.read_csv(file)
         if 'value' not in df.columns:
-            continue  # skip files without required column
+            continue
         values = df['value'].values
         if len(values) >= n_steps:
             for i in range(len(values) - n_steps + 1):
@@ -101,21 +101,17 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     z_log_var = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
     z_log_var = tf.clip_by_value(z_log_var, -10.0, 10.0)
     z = Sampling()([z_mean, z_log_var])
-
     # Decoder.
     decoder_h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')
     h_decoded = decoder_h(z)
     decoder_mean = layers.Dense(original_dim, activation='sigmoid')
     x_decoded_mean = decoder_mean(h_decoded)
-
     encoder = models.Model(inputs, [z_mean, z_log_var, z])
     vae = models.Model(inputs, x_decoded_mean)
-
     reconstruction_loss = losses.mse(inputs, x_decoded_mean) * original_dim
     kl_loss = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
     vae_loss = tf.reduce_mean(reconstruction_loss + kl_loss)
     vae.add_loss(vae_loss)
-
     optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=0.001, clipnorm=1.0)
     vae.compile(optimizer=optimizer)
     return vae, encoder
@@ -129,7 +125,7 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 
 
 #####################################################
-# State function for binary anomaly detection.
+# State and Reward Functions.
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
     if timeseries_curser == n_steps:
         state = []
@@ -149,7 +145,6 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
-        # Use the VAE to compute reconstruction error.
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
         vae_penalty = - dynamic_coef * reconstruction_error
@@ -172,7 +167,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
 
 
 # ----------------------------
-# Q-value function approximator using a TensorFlow RNN.
+# Q-value Function Approximator (RNN).
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -197,10 +192,10 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            self.train_op = self.optimizer.minimize(self.loss,
-                                                    global_step=
-                                                    tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
-                                                                                scope="global_step")[0])
+            # Use the global step variable from the collection.
+            global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[
+                0]
+            self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
                 tf.compat.v1.summary.scalar("loss", self.loss),
@@ -293,7 +288,11 @@ def q_learning(env,
         saver.restore(sess, latest_checkpoint)
         if test:
             return
-    total_t = sess.run(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0])
+    # Get global_step from the collection.
+    global_step_list = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")
+    if len(global_step_list) == 0:
+        raise ValueError("global_step variable not found!")
+    total_t = sess.run(global_step_list[0])
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
     policy = make_epsilon_greedy_policy(qlearn_estimator, env.action_space_n)
     num_label = 0
@@ -345,7 +344,7 @@ def q_learning(env,
 
         if i_episode % 50 == 49:
             print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
-            saver.save(tf.compat.v1.get_default_session(), checkpoint_path)
+            saver.save(sess, checkpoint_path)
 
         per_loop_time1 = time.time()
         state = env.reset()
@@ -573,20 +572,20 @@ def train(num_LP, num_AL, discount_factor):
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=50, batch_size=32)
     vae.save('vae_model.h5')
-    # We will later re-load the VAE after resetting the graph.
+    # We will re-load the VAE after resetting the graph.
 
     percentage = [1]
     test = 0
     for j in range(len(percentage)):
-        exp_relative_dir = ['A1_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) + '_num_AL' + str(num_AL) +
-                            '_d' + str(discount_factor)]
+        exp_relative_dir = ['A1_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) +
+                            '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
         dataset_dir = [os.path.join(current_dir, "ydata-labeled-time-series-anomalies-v1_0", "A1Benchmark")]
         for i in range(len(dataset_dir)):
             env = EnvTimeSeriesfromRepo(dataset_dir[i])
             env.statefnc = RNNBinaryStateFuc
-            # Initially set the reward function with a starting dynamic_coef.
-            env.rewardfnc = lambda timeseries, timeseries_curser, action: \
-                RNNBinaryRewardFuc(timeseries, timeseries_curser, action, vae, dynamic_coef=10.0)
+            # Set reward function with an initial dynamic_coef.
+            env.rewardfnc = lambda timeseries, timeseries_curser, action: RNNBinaryRewardFuc(
+                timeseries, timeseries_curser, action, vae, dynamic_coef=10.0)
             env.timeseries_curser_init = n_steps
             env.datasetfix = DATAFIXED
             env.datasetidx = 0
@@ -598,19 +597,18 @@ def train(num_LP, num_AL, discount_factor):
                 env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
             experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[i]))
 
-            # --- NEW: Reset the default graph and re-load the VAE ---
+            # --- Reset graph, re-load VAE, and create global_step before initializing ---
             tf.compat.v1.reset_default_graph()
             vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
             sess = tf.compat.v1.Session()
-            # Instead of tf.keras.backend.set_session, use the TF1 compat Keras backend.
             from tensorflow.compat.v1.keras import backend as K
             K.set_session(sess)
-            sess.run(tf.compat.v1.global_variables_initializer())
-            # ---------------------------------------------------------
-
+            # Create global_step before initialization.
             global_step = tf.Variable(0, name="global_step", trainable=False)
             qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
             target_estimator = Q_Estimator_Nonlinear(scope="target")
+            sess.run(tf.compat.v1.global_variables_initializer())
+            # ---------------------------------------------------------
 
             with sess.as_default():
                 q_learning(env,
