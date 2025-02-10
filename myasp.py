@@ -302,7 +302,7 @@ def q_learning(env,
         env.reset()
         data_train.extend(env.states_list)
     # Build a warm-up model using the IsolationForest on the sliding windows.
-    # Here we assume that x_train (built from normal-data) is in the same format as your state windows.
+    # Convert data_train to a numpy array within the warm-up function.
     model = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
     for t in itertools.count():
@@ -548,9 +548,9 @@ class WarmUp(object):
         return samples
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
-        # Here, X_train is assumed to be an array of sliding windows of shape (num_samples, n_steps).
-        # We extract the last value of each window to mimic how the reward function uses the window.
-        data = X_train[:, -1].reshape(-1, 1)
+        # Convert the list to a numpy array before indexing.
+        X_train_arr = np.array(X_train)
+        data = X_train_arr[:, -1].reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
