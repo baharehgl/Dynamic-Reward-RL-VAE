@@ -68,7 +68,7 @@ def load_normal_data(data_path, n_steps):
     for file in all_files:
         df = pd.read_csv(file)
         if 'value' not in df.columns:
-            continue
+            continue  # skip files without required column
         values = df['value'].values
         if len(values) >= n_steps:
             for i in range(len(values) - n_steps + 1):
@@ -142,6 +142,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
 
 
+# --- Modified Reward Function ---
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
@@ -150,8 +151,11 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         vae_penalty = - dynamic_coef * reconstruction_error
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
-        if timeseries['label'][timeseries_curser] == 1:
+        elif timeseries['label'][timeseries_curser] == 1:
             return [FN_Value + vae_penalty, TP_Value + vae_penalty]
+        else:
+            # If label is not 0 or 1 (for example still -1), return a neutral reward.
+            return [0, 0]
     else:
         return [0, 0]
 
@@ -167,7 +171,7 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
 
 
 # ----------------------------
-# Q-value Function Approximator (RNN).
+# Q-value Function Approximator using a TensorFlow RNN.
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -603,7 +607,7 @@ def train(num_LP, num_AL, discount_factor):
             sess = tf.compat.v1.Session()
             from tensorflow.compat.v1.keras import backend as K
             K.set_session(sess)
-            # Create global_step before initialization.
+            # Create global_step before initializing.
             global_step = tf.Variable(0, name="global_step", trainable=False)
             qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
             target_estimator = Q_Estimator_Nonlinear(scope="target")
