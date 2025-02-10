@@ -142,7 +142,6 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
 
 
-# Modified reward function: if label is not 0 or 1, return a neutral reward.
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
@@ -259,6 +258,88 @@ def update_dynamic_coef(current_coef, episode_reward, target_reward=0.0,
     return max(min(new_coef, max_coef), min_coef)
 
 
+# --- Updated active_learning class ---
+class active_learning(object):
+    def __init__(self, env, N, strategy, estimator, already_selected):
+        self.env = env
+        self.N = N
+        self.strategy = strategy
+        self.estimator = estimator
+        self.already_selected = already_selected
+
+    def get_samples(self):
+        states_list = self.env.states_list
+        distances = []
+        for state in states_list:
+            q = self.estimator.predict(state=[state])[0]
+            distance = abs(q[0] - q[1])
+            distances.append(distance)
+        distances = np.array(distances)
+        if len(distances.shape) < 2:
+            min_margin = abs(distances)
+        else:
+            sort_distances = np.sort(distances, axis=1)[:, -2:]
+            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
+        rank_ind = np.argsort(min_margin)
+        # Filter out indices that are out of range or already selected.
+        rank_ind = [i for i in rank_ind if i < len(states_list) and i not in self.already_selected]
+        active_samples = rank_ind[0:self.N]
+        return active_samples
+
+    def get_samples_by_score(self, threshold):
+        states_list = self.env.states_list
+        distances = []
+        for state in states_list:
+            q = self.estimator.predict(state=[state])[0]
+            distance = abs(q[0] - q[1])
+            distances.append(distance)
+        distances = np.array(distances)
+        if len(distances.shape) < 2:
+            min_margin = abs(distances)
+        else:
+            sort_distances = np.sort(distances, axis=1)[:, -2:]
+            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
+        rank_ind = np.argsort(min_margin)
+        rank_ind = [i for i in rank_ind if i < len(states_list) and i not in self.already_selected]
+        active_samples = [t for t in rank_ind if distances[t] < threshold]
+        return active_samples
+
+    def label(self, active_samples):
+        for sample in active_samples:
+            print('AL finds one of the most confused samples:')
+            print(self.env.timeseries['value'].iloc[sample:sample + n_steps])
+            print('Please label the last timestamp based on your knowledge')
+            print('0 for non-anomaly; 1 for anomaly')
+            label = input()
+            self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = label
+        return
+
+
+class WarmUp(object):
+    def warm_up_SVM(self, outliers_fraction, N):
+        states_list = self.env.get_states_list()
+        data = np.array(states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
+        model = OneClassSVM(gamma='auto', nu=0.95 * outliers_fraction)
+        model.fit(data)
+        distances = model.decision_function(data)
+        if len(distances.shape) < 2:
+            min_margin = abs(distances)
+        else:
+            sort_distances = np.sort(distances, axis=1)[:, -2:]
+            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
+        rank_ind = np.argsort(min_margin)
+        samples = rank_ind[0:N]
+        return samples
+
+    def warm_up_isolation_forest(self, outliers_fraction, X_train):
+        from sklearn.ensemble import IsolationForest
+        X_train_arr = np.array(X_train)
+        data = X_train_arr[:, -1].reshape(-1, 1)
+        clf = IsolationForest(contamination=outliers_fraction)
+        clf.fit(data)
+        return clf
+
+
 def q_learning(env,
                sess,
                qlearn_estimator,
@@ -291,7 +372,6 @@ def q_learning(env,
         saver.restore(sess, latest_checkpoint)
         if test:
             return
-    # Get global_step from the collection.
     global_step_list = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")
     if len(global_step_list) == 0:
         raise ValueError("global_step variable not found!")
@@ -340,10 +420,9 @@ def q_learning(env,
 
     dynamic_coef = 10.0
 
-    # --- Convert labeled indices (from full timeseries) to indices into states_list.
+    # Convert labeled indices (from full timeseries) to indices into states_list.
     labeled_index = [i for i, e in enumerate(env.timeseries['label']) if e != -1]
     labeled_index = [i - n_steps for i in labeled_index if i >= n_steps and (i - n_steps) < len(env.states_list)]
-    # --- End conversion
 
     for i_episode in range(num_episodes):
         env.rewardfnc = lambda timeseries, timeseries_curser, action: \
@@ -359,7 +438,6 @@ def q_learning(env,
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
             print('double reset')
-        # Extend labeled_index with active learning samples (these are already indices into states_list).
         al = active_learning(env=env, N=num_active_learning, strategy='margin_sampling',
                              estimator=qlearn_estimator, already_selected=labeled_index)
         al_samples = al.get_samples()
@@ -488,86 +566,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     if record_dir:
         rec_file.close()
     return f1_overall / num_episodes
-
-
-class active_learning(object):
-    def __init__(self, env, N, strategy, estimator, already_selected):
-        self.env = env
-        self.N = N
-        self.strategy = strategy
-        self.estimator = estimator
-        self.already_selected = already_selected
-
-    def get_samples(self):
-        states_list = self.env.states_list
-        distances = []
-        for state in states_list:
-            q = self.estimator.predict(state=[state])[0]
-            distance = abs(q[0] - q[1])
-            distances.append(distance)
-        distances = np.array(distances)
-        if len(distances.shape) < 2:
-            min_margin = abs(distances)
-        else:
-            sort_distances = np.sort(distances, 1)[:, -2:]
-            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
-        rank_ind = np.argsort(min_margin)
-        rank_ind = [i for i in rank_ind if i not in self.already_selected]
-        active_samples = rank_ind[0:self.N]
-        return active_samples
-
-    def get_samples_by_score(self, threshold):
-        states_list = self.env.states_list
-        distances = []
-        for state in states_list:
-            q = self.estimator.predict(state=[state])[0]
-            distance = abs(q[0] - q[1])
-            distances.append(distance)
-        distances = np.array(distances)
-        if len(distances.shape) < 2:
-            min_margin = abs(distances)
-        else:
-            sort_distances = np.sort(distances, 1)[:, -2:]
-            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
-        rank_ind = np.argsort(min_margin)
-        rank_ind = [i for i in rank_ind if i not in self.already_selected]
-        active_samples = [t for t in rank_ind if distances[t] < threshold]
-        return active_samples
-
-    def label(self, active_samples):
-        for sample in active_samples:
-            print('AL finds one of the most confused samples:')
-            print(self.env.timeseries['value'].iloc[sample:sample + n_steps])
-            print('Please label the last timestamp based on your knowledge')
-            print('0 for non-anomaly; 1 for anomaly')
-            label = input()
-            self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = label
-        return
-
-
-class WarmUp(object):
-    def warm_up_SVM(self, outliers_fraction, N):
-        states_list = self.env.get_states_list()
-        data = np.array(states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        model = OneClassSVM(gamma='auto', nu=0.95 * outliers_fraction)
-        model.fit(data)
-        distances = model.decision_function(data)
-        if len(distances.shape) < 2:
-            min_margin = abs(distances)
-        else:
-            sort_distances = np.sort(distances, 1)[:, -2:]
-            min_margin = sort_distances[:, 1] - sort_distances[:, 0]
-        rank_ind = np.argsort(min_margin)
-        samples = rank_ind[0:N]
-        return samples
-
-    def warm_up_isolation_forest(self, outliers_fraction, X_train):
-        from sklearn.ensemble import IsolationForest
-        X_train_arr = np.array(X_train)
-        data = X_train_arr[:, -1].reshape(-1, 1)
-        clf = IsolationForest(contamination=outliers_fraction)
-        clf.fit(data)
-        return clf
 
 
 def train(num_LP, num_AL, discount_factor):
