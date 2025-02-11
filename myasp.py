@@ -41,9 +41,9 @@ EPSILON_DECAY = 1.00  # epsilon decay
 
 # Extrinsic reward values (heuristic):
 TN_Value = 1  # True Negative
-TP_Value = 10  # True Positive
-FP_Value = -2  # False Positive
-FN_Value = -10  # False Negative
+TP_Value = 5  # True Positive
+FP_Value = -1  # False Positive
+FN_Value = -5  # False Negative
 
 NOT_ANOMALY = 0
 ANOMALY = 1
@@ -233,7 +233,7 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
 
 
 # Proportional update for dynamic coefficient.
-def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward=0.0, alpha=0.001, min_coef=0.1,
+def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward=100.0, alpha=0.01, min_coef=0.1,
                                      max_coef=10.0):
     new_coef = current_coef + alpha * (target_reward - episode_reward)
     return max(min(new_coef, max_coef), min_coef)
@@ -554,7 +554,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "normal-data")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=50, batch_size=32)
+    vae.fit(x_train, epochs=200, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
