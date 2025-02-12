@@ -139,7 +139,8 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-        vae_penalty = - dynamic_coef * reconstruction_error
+        #vae_penalty = - dynamic_coef * reconstruction_error
+        vae_penalty = dynamic_coef * reconstruction_error
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
         elif timeseries['label'][timeseries_curser] == 1:
