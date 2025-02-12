@@ -1,5 +1,4 @@
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -180,8 +179,7 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[
-                0]
+            global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0]
             self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
@@ -463,16 +461,11 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
 
 
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
+    from sklearn.metrics import precision_recall_fscore_support
     rec_file = open(record_dir + 'performance.txt', 'w')
-    p_overall = 0;
-    recall_overall = 0;
-    f1_overall = 0;
-    reward_overall = 0
+    precision_all, recall_all, f1_all = [], [], []
     for i_episode in range(num_episodes):
         print("Episode {}/{}".format(i_episode + 1, num_episodes))
-        state_rec = []
-        action_rec = []
-        reward_rec = []
         policy = make_epsilon_greedy_policy(estimator, env.action_space_n, tf.compat.v1.get_default_session())
         state = env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
@@ -481,53 +474,45 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             env.states_list = [s for s in env.states_list if s is not None]
             print('double reset')
         print('testing on: ' + str(env.repodirext[env.datasetidx]))
+        predictions = []
+        ground_truths = []
+        ts_values = []
         for t in itertools.count():
             action_probs = policy(state, 0)
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+            predictions.append(action)
+            # Retrieve ground truth from the environment.
+            current_index = env.timeseries_curser
+            if hasattr(env.timeseries['anomaly'], 'iloc'):
+                ground_truth = env.timeseries['anomaly'].iloc[current_index]
+            else:
+                ground_truth = env.timeseries['anomaly'][current_index]
+            ground_truths.append(ground_truth)
+            ts_values.append(state[len(state) - 1][0])
             next_state, reward, done, _ = env.step(action)
-            state_rec.append(state[len(state) - 1][0])
-            action_rec.append(action)
-            reward_rec.append(reward[action])
             if done:
                 break
             state = next_state[action]
-        RNG = 5
-        for i in range(len(reward_rec)):
-            if reward_rec[i] < 0:
-                low_range = max(0, i - RNG)
-                up_range = min(i + RNG + 1, len(reward_rec))
-                r = reward_rec[low_range:up_range]
-                if r.count(TP_Value) > 0:
-                    reward_rec[i] = -reward_rec[i]
+        precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
+        precision_all.append(precision)
+        recall_all.append(recall)
+        f1_all.append(f1)
+        print("Episode {}: Precision:{}, Recall:{}, F1-score:{}".format(i_episode+1, precision, recall, f1))
+        rec_file.write("Episode {}: Precision:{}, Recall:{}, F1-score:{}\n".format(i_episode+1, precision, recall, f1))
         if plot:
             f, axarr = plt.subplots(3, sharex=True)
-            axarr[0].plot(state_rec)
+            axarr[0].plot(ts_values)
             axarr[0].set_title('Time Series')
-            axarr[1].plot(action_rec, color='g')
-            axarr[1].set_title('Action')
-            axarr[2].plot(reward_rec, color='r')
-            axarr[2].set_title('Reward')
+            axarr[1].plot(predictions, color='g')
+            axarr[1].set_title('Predictions')
+            axarr[2].plot(ground_truths, color='r')
+            axarr[2].set_title('Ground Truth')
             plt.savefig(os.path.join(record_dir, "validation_episode_{}.png".format(i_episode)))
             plt.close(f)
-        tp = reward_rec.count(TP_Value)
-        fp = reward_rec.count(FP_Value)
-        fn = reward_rec.count(FN_Value)
-        precision = (tp + 1) / float(tp + fp + 1)
-        recall = (tp + 1) / float(tp + fn + 1)
-        f1 = 2 * ((precision * recall) / (precision + recall))
-        p_overall += precision;
-        recall_overall += recall;
-        f1_overall += f1
-        reward_overall += np.array(reward_rec).sum()
-        print("Precision:{}, Recall:{}, F1-score:{} ".format(p_overall / num_episodes, recall_overall / num_episodes,
-                                                             f1_overall / num_episodes))
-        rec_file.write(
-            "Precision:{}, Recall:{}, F1-score:{} ".format(p_overall / num_episodes, recall_overall / num_episodes,
-                                                           f1_overall / num_episodes))
-        print('reward: ' + str(reward_overall))
-    if record_dir:
-        rec_file.close()
-    return f1_overall / num_episodes
+    rec_file.close()
+    avg_f1 = np.mean(f1_all)
+    print("Average F1-score over {} episodes: {}".format(num_episodes, avg_f1))
+    return avg_f1
 
 
 def save_plots(experiment_dir, episode_rewards, coef_history):
