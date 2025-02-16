@@ -24,8 +24,8 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment.
-# Make sure your EnvTimeSeriesfromRepo is updated to support the KPI data file formats.
+# Import your environment.
+# Make sure EnvTimeSeriesfromRepo supports the file formats for the respective dataset.
 from env import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -33,18 +33,18 @@ from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
-# Macros and Hyperparameters.
+# Global Macros and Hyperparameters.
 DATAFIXED = 0  # whether target is fixed to a single time series
-EPISODES = 300  # number of episodes (for demonstration)
+EPISODES = 300  # number of episodes
 DISCOUNT_FACTOR = 0.5  # reward discount factor
 EPSILON = 0.5  # epsilon-greedy parameter
 EPSILON_DECAY = 1.00  # epsilon decay
 
-# Extrinsic reward values (heuristic):
-TN_Value = 1  # True Negative
-TP_Value = 5  # True Positive
-FP_Value = -1  # False Positive
-FN_Value = -5  # False Negative
+# Extrinsic reward values (heuristic)
+TN_Value = 1
+TP_Value = 5
+FP_Value = -1
+FN_Value = -5
 
 NOT_ANOMALY = 0
 ANOMALY = 1
@@ -52,7 +52,7 @@ action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
 n_steps = 25  # sliding window length
-n_input_dim = 2  # dimension of input to LSTM
+n_input_dim = 2  # input dimension (for LSTM)
 n_hidden_dim = 128  # hidden dimension
 
 validation_separate_ratio = 0.9
@@ -61,13 +61,15 @@ validation_separate_ratio = 0.9
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
     """
-    Load normal (non-anomalous) KPI data from the CSV file in KPI_data/train.
-    Adjust column names if necessary.
+    Load normal (non-anomalous) data.
+    For the Yahoo dataset, assume data is in CSV format with a 'value' column.
+    For the KPI dataset, the training CSV is assumed to be in KPI_data/train.
+    Adjust column names as needed.
     """
     train_file = os.path.join(data_path, "phase2_train.csv")
     df = pd.read_csv(train_file)
     if 'value' not in df.columns:
-        raise ValueError("Column 'value' not found in KPI train file!")
+        raise ValueError("Column 'value' not found!")
     values = df['value'].values
     windows = []
     if len(values) >= n_steps:
@@ -131,10 +133,8 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         state.append([timeseries['value'][timeseries_curser], 1])
         return np.array(state, dtype='float32')
     if timeseries_curser > n_steps:
-        state0 = np.concatenate((previous_state[1:n_steps],
-                                 [[timeseries['value'][timeseries_curser], 0]]))
-        state1 = np.concatenate((previous_state[1:n_steps],
-                                 [[timeseries['value'][timeseries_curser], 1]]))
+        state0 = np.concatenate((previous_state[1:n_steps], [[timeseries['value'][timeseries_curser], 0]]))
+        state1 = np.concatenate((previous_state[1:n_steps], [[timeseries['value'][timeseries_curser], 1]]))
         return np.array([state0, state1], dtype='float32')
     return None
 
@@ -305,7 +305,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
-               num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None):
+               num_LabelPropagation=5, num_active_learning=10, test=0, vae_model=None):
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -328,8 +328,10 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     num_label = 0
     print('Warm up starting...')
     outliers_fraction = 0.01
+    # Limit the warm-up samples to manage memory (especially for 3 million data points)
+    MAX_WARMUP_SAMPLES = 10000
     data_train = []
-    for num in range(env.datasetsize):
+    for num in range(min(env.datasetsize, MAX_WARMUP_SAMPLES)):
         env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
         data_train.extend(env.states_list)
@@ -538,9 +540,21 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.close()
 
 
-def train_wrapper(num_LP, num_AL, discount_factor):
-    # Point to KPI_data/train for training.
-    data_directory = os.path.join(current_dir, "KPI_data", "train")
+def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
+    """
+    For dataset_type:
+      - "Yahoo": Assumes the training data is located in a Yahoo-specific folder.
+                 The paper reports active queries of 1, 5, and 10 (1%, 5%, 10% of data).
+      - "KPI":   Assumes the training data is in KPI_data/train and the test ground truth in KPI_data/test.
+                 The paper uses 5 and 10 queries (0.05% and 0.1% of data) per episode.
+    """
+    if dataset_type == "KPI":
+        data_directory = os.path.join(current_dir, "KPI_data", "train")
+    elif dataset_type == "Yahoo":
+        data_directory = os.path.join(current_dir, "ydata-labeled-time-series-anomalies-v1_0", "A1Benchmark")
+    else:
+        raise ValueError("Unknown dataset type!")
+
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=200, batch_size=32)
@@ -548,62 +562,80 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 
     percentage = [1]
     test = 0
-    # For KPI, assume the training environment is built from the KPI train CSV
-    # and testing uses the ground truth stored in the HDF file.
-    for j in range(len(percentage)):
-        exp_relative_dir = ['KPI_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) +
-                            '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        # For training, use the KPI train folder.
+    # For KPI, testing uses the ground truth stored in HDF;
+    # for Yahoo, the environment should be able to load data appropriately.
+    if dataset_type == "KPI":
         dataset_dir = [os.path.join(current_dir, "KPI_data", "train")]
-        env = EnvTimeSeriesfromRepo(dataset_dir[0])
-        # Set the ground truth file for testing.
+    else:
+        dataset_dir = [data_directory]
+
+    env = EnvTimeSeriesfromRepo(dataset_dir[0])
+    if dataset_type == "KPI":
         env.ground_truth_file = os.path.join(current_dir, "KPI_data", "test", "phase2_ground_truth.hdf")
-        env.statefnc = RNNBinaryStateFuc
-        env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
-        env.timeseries_curser_init = n_steps
-        env.datasetfix = DATAFIXED
-        env.datasetidx = 0
-        env_test = env
-        env_test.rewardfnc = RNNBinaryRewardFucTest
-        if test == 1:
-            env.datasetrng = env.datasetsize
-        else:
-            env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
-        experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[0]))
+    env.statefnc = RNNBinaryStateFuc
+    env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
+    env.timeseries_curser_init = n_steps
+    env.datasetfix = DATAFIXED
+    env.datasetidx = 0
+    env_test = env
+    env_test.rewardfnc = RNNBinaryRewardFucTest
+    if test == 1:
+        env.datasetrng = env.datasetsize
+    else:
+        env.datasetrng = np.int32(env.datasetsize * float(percentage[0]))
+    exp_relative_dir = ["{}_LP_{}init_warmup_h128_b256_300ep_num_LP{}_num_AL{}_d{}".format(
+        dataset_type, 1500, num_LP, num_AL, discount_factor)]
+    experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[0]))
 
-        tf.compat.v1.reset_default_graph()
-        vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
-        sess = tf.compat.v1.Session()
-        from tensorflow.compat.v1.keras import backend as K
-        K.set_session(sess)
-        global_step = tf.Variable(0, name="global_step", trainable=False)
-        qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
-        target_estimator = Q_Estimator_Nonlinear(scope="target")
-        sess.run(tf.compat.v1.global_variables_initializer())
+    tf.compat.v1.reset_default_graph()
+    vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
+    sess = tf.compat.v1.Session()
+    from tensorflow.compat.v1.keras import backend as K
+    K.set_session(sess)
+    global_step = tf.Variable(0, name="global_step", trainable=False)
+    qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
+    target_estimator = Q_Estimator_Nonlinear(scope="target")
+    sess.run(tf.compat.v1.global_variables_initializer())
 
-        with sess.as_default():
-            episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                       num_episodes=300, num_epoches=10,
-                                                       experiment_dir=experiment_dir,
-                                                       replay_memory_size=500000,
-                                                       replay_memory_init_size=1500,
-                                                       update_target_estimator_every=10,
-                                                       epsilon_start=1,
-                                                       epsilon_end=0.1,
-                                                       epsilon_decay_steps=500000,
-                                                       discount_factor=discount_factor,
-                                                       batch_size=256,
-                                                       num_LabelPropagation=num_LP,
-                                                       num_active_learning=num_AL,
-                                                       test=test,
-                                                       vae_model=vae)
-            final_metric = q_learning_validator(env_test, qlearn_estimator,
-                                                int(env.datasetsize * (1 - validation_separate_ratio)),
-                                                experiment_dir)
-        save_plots(experiment_dir, episode_rewards, coef_history)
-        return final_metric
+    with sess.as_default():
+        episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
+                                                   num_episodes=EPISODES, num_epoches=10,
+                                                   experiment_dir=experiment_dir,
+                                                   replay_memory_size=500000,
+                                                   replay_memory_init_size=1500,
+                                                   update_target_estimator_every=10,
+                                                   epsilon_start=1,
+                                                   epsilon_end=0.1,
+                                                   epsilon_decay_steps=500000,
+                                                   discount_factor=discount_factor,
+                                                   batch_size=256,
+                                                   num_LabelPropagation=num_LP,
+                                                   num_active_learning=num_AL,
+                                                   test=test,
+                                                   vae_model=vae)
+        final_metric = q_learning_validator(env_test, qlearn_estimator,
+                                            int(env.datasetsize * (1 - validation_separate_ratio)),
+                                            experiment_dir)
+    save_plots(experiment_dir, episode_rewards, coef_history)
+    return final_metric
 
 
-train_wrapper(100, 30, 0.92)
-train_wrapper(150, 50, 0.94)
-train_wrapper(200, 100, 0.96)
+############################
+# Main Experiment Loop
+# Set the dataset type and loop over the desired active query settings.
+#
+# For Yahoo, use active_query_count in {1, 5, 10} (i.e., 1%, 5%, 10% queries per episode).
+# For KPI, use active_query_count in {5, 10} (i.e., 0.05% and 0.1% queries per episode).
+
+DATASET_TYPE = "KPI"  # change to "Yahoo" if running Yahoo experiments
+
+if DATASET_TYPE == "Yahoo":
+    for active_query in [1, 5, 10]:
+        print("Running experiment for Yahoo dataset with {} active queries per episode".format(active_query))
+        metric = train_wrapper(active_query, active_query, 0.94, dataset_type="Yahoo")
+        print("Final metric for {} queries: {}".format(active_query, metric))
+elif DATASET_TYPE == "KPI":
+    for active_query in [5, 10]:
+        print("Running experiment for KPI dataset with {} active queries per episode".format(active_query))
+        metric = train_wrapper(active_query, active_query, 0.94, dataset_type="KPI")
+        print("Final metric for {} queries: {}".format(active_query, metric))
