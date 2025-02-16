@@ -24,8 +24,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import your environment.
-# Make sure EnvTimeSeriesfromRepo supports the file formats for the respective dataset.
+# Import your environment (with the modified encoding).
 from env import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -62,14 +61,13 @@ validation_separate_ratio = 0.9
 def load_normal_data(data_path, n_steps):
     """
     Load normal (non-anomalous) data.
-    For the Yahoo dataset, assume data is in CSV format with a 'value' column.
     For the KPI dataset, the training CSV is assumed to be in KPI_data/train.
     Adjust column names as needed.
     """
     train_file = os.path.join(data_path, "phase2_train.csv")
     df = pd.read_csv(train_file)
     if 'value' not in df.columns:
-        raise ValueError("Column 'value' not found!")
+        raise ValueError("Column 'value' not found in the training file!")
     values = df['value'].values
     windows = []
     if len(values) >= n_steps:
@@ -544,9 +542,7 @@ def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
     """
     For dataset_type:
       - "Yahoo": Assumes the training data is located in a Yahoo-specific folder.
-                 The paper reports active queries of 1, 5, and 10 (1%, 5%, 10% of data).
       - "KPI":   Assumes the training data is in KPI_data/train and the test ground truth in KPI_data/test.
-                 The paper uses 5 and 10 queries (0.05% and 0.1% of data) per episode.
     """
     if dataset_type == "KPI":
         data_directory = os.path.join(current_dir, "KPI_data", "train")
@@ -557,13 +553,11 @@ def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
 
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=5, batch_size=32)
+    vae.fit(x_train, epochs=2, batch_size=32)
     vae.save('vae_model.h5')
 
     percentage = [1]
     test = 0
-    # For KPI, testing uses the ground truth stored in HDF;
-    # for Yahoo, the environment should be able to load data appropriately.
     if dataset_type == "KPI":
         dataset_dir = [os.path.join(current_dir, "KPI_data", "train")]
     else:
@@ -622,12 +616,13 @@ def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
 
 ############################
 # Main Experiment Loop
-# Set the dataset type and loop over the desired active query settings.
 #
-# For Yahoo, use active_query_count in {1, 5, 10} (i.e., 1%, 5%, 10% queries per episode).
-# For KPI, use active_query_count in {5, 10} (i.e., 0.05% and 0.1% queries per episode).
+# For the Yahoo dataset, active_query settings are {1, 5, 10}.
+# For the KPI dataset, active_query settings are {5, 10}.
+#
+# Here we set DATASET_TYPE to "KPI" (change to "Yahoo" as needed).
 
-DATASET_TYPE = "KPI"  # change to "Yahoo" if running Yahoo experiments
+DATASET_TYPE = "KPI"
 
 if DATASET_TYPE == "Yahoo":
     for active_query in [1, 5, 10]:
