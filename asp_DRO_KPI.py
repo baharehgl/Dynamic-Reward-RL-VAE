@@ -24,7 +24,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import your environment (with the modified encoding).
+# Import the environment (which now uses latin1 encoding).
 from env import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -60,12 +60,12 @@ validation_separate_ratio = 0.9
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
     """
-    Load normal (non-anomalous) data.
-    For the KPI dataset, the training CSV is assumed to be in KPI_data/train.
+    Load normal KPI data from the training CSV.
     Adjust column names as needed.
     """
     train_file = os.path.join(data_path, "phase2_train.csv")
-    df = pd.read_csv(train_file)
+    # You may also specify encoding here if necessary.
+    df = pd.read_csv(train_file, encoding='latin1')
     if 'value' not in df.columns:
         raise ValueError("Column 'value' not found in the training file!")
     values = df['value'].values
@@ -131,8 +131,10 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         state.append([timeseries['value'][timeseries_curser], 1])
         return np.array(state, dtype='float32')
     if timeseries_curser > n_steps:
-        state0 = np.concatenate((previous_state[1:n_steps], [[timeseries['value'][timeseries_curser], 0]]))
-        state1 = np.concatenate((previous_state[1:n_steps], [[timeseries['value'][timeseries_curser], 1]]))
+        state0 = np.concatenate((previous_state[1:n_steps],
+                                 [[timeseries['value'][timeseries_curser], 0]]))
+        state1 = np.concatenate((previous_state[1:n_steps],
+                                 [[timeseries['value'][timeseries_curser], 1]]))
         return np.array([state0, state1], dtype='float32')
     return None
 
@@ -326,7 +328,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     num_label = 0
     print('Warm up starting...')
     outliers_fraction = 0.01
-    # Limit the warm-up samples to manage memory (especially for 3 million data points)
     MAX_WARMUP_SAMPLES = 10000
     data_train = []
     for num in range(min(env.datasetsize, MAX_WARMUP_SAMPLES)):
@@ -482,7 +483,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             action_probs = policy(state, 0)
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
             predictions.append(action)
-            # Retrieve ground truth from the environment.
             current_index = env.timeseries_curser
             if hasattr(env.timeseries['anomaly'], 'iloc'):
                 ground_truth = env.timeseries['anomaly'].iloc[current_index]
@@ -539,11 +539,6 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
 
 
 def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
-    """
-    For dataset_type:
-      - "Yahoo": Assumes the training data is located in a Yahoo-specific folder.
-      - "KPI":   Assumes the training data is in KPI_data/train and the test ground truth in KPI_data/test.
-    """
     if dataset_type == "KPI":
         data_directory = os.path.join(current_dir, "KPI_data", "train")
     elif dataset_type == "Yahoo":
@@ -616,13 +611,7 @@ def train_wrapper(num_LP, num_AL, discount_factor, dataset_type="KPI"):
 
 ############################
 # Main Experiment Loop
-#
-# For the Yahoo dataset, active_query settings are {1, 5, 10}.
-# For the KPI dataset, active_query settings are {5, 10}.
-#
-# Here we set DATASET_TYPE to "KPI" (change to "Yahoo" as needed).
-
-DATASET_TYPE = "KPI"
+DATASET_TYPE = "KPI"  # Change to "Yahoo" for Yahoo experiments.
 
 if DATASET_TYPE == "Yahoo":
     for active_query in [1, 5, 10]:
