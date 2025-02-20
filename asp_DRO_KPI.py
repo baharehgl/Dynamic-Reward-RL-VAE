@@ -57,8 +57,13 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        # For simplicity, return the first n_steps rows as the initial state.
-        n_steps = 25  # Must match the global n_steps below.
+        n_steps = 25  # Must match global n_steps
+        # Create sliding windows (states_list) from the "value" column.
+        self.states_list = []
+        values = self.timeseries["value"].values
+        for i in range(len(values) - n_steps + 1):
+            self.states_list.append(values[i:i + n_steps])
+        # Return the first n_steps rows as the initial state (as a DataFrame slice).
         return self.timeseries.iloc[0:n_steps]
 
     def step(self, action):
@@ -114,7 +119,7 @@ def load_normal_data(data_path, n_steps):
     windows = []
     if len(values) >= n_steps:
         for i in range(len(values) - n_steps + 1):
-            window = values[i: i + n_steps]
+            window = values[i:i + n_steps]
             windows.append(window)
     windows = np.array(windows)
     scaler = StandardScaler()
@@ -323,7 +328,9 @@ class WarmUp(object):
         if X_train_arr.ndim == 1:
             data = X_train_arr.reshape(-1, 1)
         else:
-            data = X_train_arr[:, -1].reshape(-1, 1)
+            # If X_train_arr is 2D, assume each row is a sample.
+            # In our case, X_train_arr is a list of sliding windows, so we take the last value of each window.
+            data = np.array([x[-1] for x in X_train_arr]).reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
@@ -363,13 +370,12 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     data_train = []
     for num in range(min(env.datasetsize, MAX_WARMUP_SAMPLES)):
         env.reset()
-        env.states_list = [s for s in env.states_list if s is not None]
+        # Ensure states_list is updated.
         data_train.extend(env.states_list)
     model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
     while True:
         env.reset()
-        env.states_list = [s for s in env.states_list if s is not None]
         data = np.array(env.states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
         anomaly_score = model_warm.decision_function(data)
         pred_score = [-s + 0.5 for s in anomaly_score]
@@ -412,10 +418,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
             saver.save(sess, checkpoint_path)
         per_loop_time1 = time.time()
         state = env.reset()
-        env.states_list = [s for s in env.states_list if s is not None]
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
-            env.states_list = [s for s in env.states_list if s is not None]
             print("double reset")
         labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries["label"])) if
                          env.timeseries["label"][i] != -1]
@@ -468,7 +472,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 q_values_next1 = target_estimator.predict(state=next_states_batch1, sess=sess)
                 targets_batch = reward_batch + (discount_factor *
                                                 np.stack((np.amax(q_values_next0, axis=1),
-                                                          np.amax(q_values_next1, axis=1)), axis=-1))
+                                                          np.amax(q_values_next1, axis=1)),
+                                                         axis=-1))
             else:
                 targets_batch = reward_batch
             qlearn_estimator.update(state=states_batch, target=targets_batch.astype(np.float32), sess=sess)
@@ -494,10 +499,8 @@ def q_learning_validator(env, estimator, num_episodes, record_dir, plot=1):
         print("Validation Episode {}/{}".format(i_episode + 1, num_episodes))
         policy = make_epsilon_greedy_policy(estimator, env.action_space_n, tf.compat.v1.get_default_session())
         state = env.reset()
-        env.states_list = [s for s in env.states_list if s is not None]
         while env.datasetidx < env.datasetrng * validation_separate_ratio:
             state = env.reset()
-            env.states_list = [s for s in env.states_list if s is not None]
             print("double reset")
         print("Testing on: " + str(env.repodirext[env.datasetidx]))
         predictions = []
