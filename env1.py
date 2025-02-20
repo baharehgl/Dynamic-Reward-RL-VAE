@@ -57,28 +57,54 @@ class EnvTimeSeriesfromRepo():
         self.statefnc = defaultStateFuc
         self.rewardfnc = defaultRewardFuc
 
-        self.datasetsize = len(self.repodirext)
-        self.datasetfix = 0
-        self.datasetidx = random.randint(0, self.datasetsize - 1)
-        self.datasetrng = self.datasetsize
-
         self.timeseries_repo = []
         self.states_list = []
 
-        # Read and preprocess each CSV file.
+        # Process each CSV file.
         for i in range(len(self.repodirext)):
-            # Here we assume the Yahoo Benchmark format: column index 1 is "value", and index 2 is "anomaly".
-            # Added encoding='latin1' to fix UnicodeDecodeError.
-            ts = pd.read_csv(self.repodirext[i], usecols=[1, 2],
-                             header=0, names=['value', 'anomaly'], encoding='latin1')
-            # Add a marker column for labeling.
-            ts['label'] = -1
-            ts = ts.astype(np.float32)
+            fname = os.path.basename(self.repodirext[i])
+            try:
+                if "phase2_train" in fname:
+                    # For KPI training file: assume it has two columns (e.g. timestamp and value).
+                    # Read without specifying usecols so that we get all columns.
+                    ts = pd.read_csv(self.repodirext[i], encoding='latin1')
+                    # If the file does not have a column named "value", assume the second column is the value.
+                    if 'value' not in ts.columns:
+                        # Rename columns assuming first is timestamp and second is value.
+                        ts.columns = ['timestamp', 'value']
+                    # For training, we may not have anomaly info.
+                    ts['anomaly'] = 0
+                    ts['label'] = -1
+                    ts = ts.astype(np.float32)
+                else:
+                    # For other files assume Yahoo format: column index 1 is "value", and index 2 is "anomaly".
+                    ts = pd.read_csv(self.repodirext[i],
+                                     usecols=[1, 2],
+                                     header=0,
+                                     names=['value', 'anomaly'],
+                                     encoding='latin1')
+                    ts['label'] = -1
+                    ts = ts.astype(np.float32)
+            except Exception as e:
+                print("Error reading file:", self.repodirext[i])
+                raise e
 
             # Scale the 'value' column to [0,1] using MinMaxScaler.
             scaler = sklearn.preprocessing.MinMaxScaler()
+            # Check that there is at least one sample.
+            if ts[['value']].shape[0] == 0:
+                print("Warning: file {} has no data; skipping.".format(self.repodirext[i]))
+                continue
             ts['value'] = scaler.fit_transform(ts[['value']])
             self.timeseries_repo.append(ts)
+
+        # Update dataset size.
+        if len(self.timeseries_repo) == 0:
+            raise ValueError("No valid time series data found in directory: {}".format(self.repodir))
+        self.datasetsize = len(self.timeseries_repo)
+        self.datasetfix = 0
+        self.datasetidx = random.randint(0, self.datasetsize - 1)
+        self.datasetrng = self.datasetsize
 
     def reset(self):
         """
@@ -117,7 +143,8 @@ class EnvTimeSeriesfromRepo():
         # Added encoding='latin1' here as well.
         self.timeseries = pd.read_csv(self.repodirext[self.datasetidx],
                                       usecols=[0, 1, 2],
-                                      header=0, names=['timestamp', 'value', 'anomaly'],
+                                      header=0,
+                                      names=['timestamp', 'value', 'anomaly'],
                                       encoding='latin1')
         self.timeseries = self.timeseries.astype(np.float32)
         self.timeseries_curser = self.timeseries_curser_init
