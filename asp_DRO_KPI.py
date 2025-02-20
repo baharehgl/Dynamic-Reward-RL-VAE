@@ -319,7 +319,11 @@ class WarmUp(object):
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
         X_train_arr = np.array(X_train)
-        data = X_train_arr[:, -1].reshape(-1, 1)
+        # If X_train_arr is 1D, reshape it; otherwise, use the last element of each sample.
+        if X_train_arr.ndim == 1:
+            data = X_train_arr.reshape(-1, 1)
+        else:
+            data = X_train_arr[:, -1].reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
@@ -464,8 +468,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 q_values_next1 = target_estimator.predict(state=next_states_batch1, sess=sess)
                 targets_batch = reward_batch + (discount_factor *
                                                 np.stack((np.amax(q_values_next0, axis=1),
-                                                          np.amax(q_values_next1, axis=1)),
-                                                         axis=-1))
+                                                          np.amax(q_values_next1, axis=1)), axis=-1))
             else:
                 targets_batch = reward_batch
             qlearn_estimator.update(state=states_batch, target=targets_batch.astype(np.float32), sess=sess)
@@ -568,13 +571,12 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=2, batch_size=32)
+    vae.fit(x_train, epochs=200, batch_size=32)
     vae.save("vae_model.h5")
 
     # Set up environment.
     env = EnvTimeSeriesfromRepo(data_directory)
-    # Add missing attribute for action space.
-    env.action_space_n = action_space_n
+    env.action_space_n = action_space_n  # Add missing attribute.
     env.ground_truth_file = os.path.join(current_dir, "KPI_data", "test", "phase2_ground_truth.hdf")
     env.statefnc = RNNBinaryStateFuc
     env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
