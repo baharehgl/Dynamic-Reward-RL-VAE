@@ -1,18 +1,17 @@
 import pandas as pd
 
-# Path to your HDF file
-hdf_path = "phase2_ground_truth.hdf"
+# 1) Read the HDF file (where you know it works, e.g. base Anaconda environment)
+df = pd.read_hdf("KPI_data/test/phase2_ground_truth.hdf")
 
-# 1) Optional: Check the available keys in the HDF store.
-store = pd.HDFStore(hdf_path)
-print("Available HDF keys:", store.keys())
-store.close()
+# 2) If your environment code expects "anomaly" instead of "label", rename columns:
+if "label" in df.columns and "anomaly" not in df.columns:
+    df.rename(columns={"label": "anomaly"}, inplace=True)
 
-# 2) Read the dataset by specifying the correct key.
-# If your HDF file has only one dataset, you might not need to specify a key.
-df = pd.read_hdf(hdf_path)  # or pd.read_hdf(hdf_path, key='some_key')
+# 3) If your environment only needs ['value', 'anomaly'] (and possibly 'timestamp'),
+#    drop any extra columns that might confuse it:
+if "KPI ID" in df.columns:
+    df.drop(columns=["KPI ID"], inplace=True)
 
-# 3) Convert to CSV
-df.to_csv("phase2_ground_truth.csv", index=False)
-
-print("Conversion complete! CSV saved as phase2_ground_truth.csv")
+# 4) Save to CSV
+df.to_csv("KPI_data/test/phase2_ground_truth.csv", index=False)
+print("Converted phase2_ground_truth.hdf to phase2_ground_truth.csv!")
