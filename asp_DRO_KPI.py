@@ -47,7 +47,7 @@ class EnvTimeSeriesfromRepo:
         self.load_data()
 
     def load_data(self):
-        # Use latin1 encoding to avoid UnicodeDecodeError.
+        # Use latin1 encoding.
         self.timeseries = pd.read_csv(self.repodirext[self.datasetidx], usecols=[1, 2], encoding="latin1")
         # Ensure columns for anomaly and label exist.
         if "anomaly" not in self.timeseries.columns:
@@ -57,35 +57,40 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        n_steps = 25  # Must match global n_steps below.
-        # Create sliding windows (states_list) from the "value" column.
+        n_steps = 25  # must match global n_steps
+        # Build sliding windows from the "value" column.
         self.states_list = []
-        values = self.timeseries["value"].values
+        # We use .iloc to ensure we get values in order.
+        values = self.timeseries["value"].iloc[:].values
         for i in range(len(values) - n_steps + 1):
             self.states_list.append(values[i:i + n_steps])
-        # Return the first n_steps rows as the initial state (DataFrame slice).
-        return self.timeseries.iloc[0:n_steps]
+        # Create the initial state as a (25,2) array.
+        # For the initial state, we set the first 24 rows to have second column 0, and the last row to have 1.
+        state = []
+        for i in range(n_steps):
+            state.append([values[i], 0])
+        state[-1][1] = 1
+        return np.array(state, dtype="float32")
 
     def step(self, action):
         # Simple stub for the step function.
         self.timeseries_curser += 1
         done = self.timeseries_curser >= len(self.timeseries)
-        reward = [0, 0]  # Placeholder reward; replace with actual logic.
+        reward = [0, 0]  # placeholder reward
         n_steps = 25
-        next_state = self.timeseries.iloc[self.timeseries_curser:self.timeseries_curser + n_steps]
+        next_state = self.timeseries.iloc[self.timeseries_curser: self.timeseries_curser + n_steps]
         return next_state, reward, done, {}
 
 
 ####################################
 # Global Hyperparameters
 ####################################
-DATAFIXED = 0  # Whether target is fixed to a single time series
-EPISODES = 300  # Number of episodes
-DISCOUNT_FACTOR = 0.5  # Reward discount factor
-EPSILON = 0.5  # Epsilon-greedy parameter
-EPSILON_DECAY = 1.00  # Epsilon decay
+DATAFIXED = 0
+EPISODES = 300
+DISCOUNT_FACTOR = 0.5
+EPSILON = 0.5
+EPSILON_DECAY = 1.00
 
-# Extrinsic reward values (heuristic)
 TN_Value = 1
 TP_Value = 5
 FP_Value = -1
@@ -96,9 +101,9 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # Sliding window length
-n_input_dim = 2  # Input dimension (for LSTM)
-n_hidden_dim = 128  # Hidden dimension
+n_steps = 25
+n_input_dim = 2
+n_hidden_dim = 128
 
 validation_separate_ratio = 0.9
 
@@ -107,20 +112,15 @@ validation_separate_ratio = 0.9
 # VAE Model Setup
 ####################################
 def load_normal_data(data_path, n_steps):
-    """
-    Loads the KPI training CSV (phase2_train.csv from KPI_data/train) using latin1 encoding.
-    Assumes a column named "value" exists.
-    """
     train_file = os.path.join(data_path, "phase2_train.csv")
     df = pd.read_csv(train_file, encoding="latin1")
     if "value" not in df.columns:
-        raise ValueError("Column 'value' not found in the training file!")
+        raise ValueError("Column 'value' not found in training file!")
     values = df["value"].values
     windows = []
     if len(values) >= n_steps:
         for i in range(len(values) - n_steps + 1):
-            window = values[i:i + n_steps]
-            windows.append(window)
+            windows.append(values[i:i + n_steps])
     windows = np.array(windows)
     scaler = StandardScaler()
     scaled_windows = scaler.fit_transform(windows)
@@ -171,18 +171,8 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 # State and Reward Functions
 ####################################
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
-    if timeseries_curser == n_steps:
-        state = []
-        for i in range(timeseries_curser):
-            state.append([timeseries["value"][i], 0])
-        state.pop(0)
-        state.append([timeseries["value"][timeseries_curser], 1])
-        return np.array(state, dtype="float32")
-    if timeseries_curser > n_steps:
-        state0 = np.concatenate((previous_state[1:n_steps], [[timeseries["value"][timeseries_curser], 0]]))
-        state1 = np.concatenate((previous_state[1:n_steps], [[timeseries["value"][timeseries_curser], 1]]))
-        return np.array([state0, state1], dtype="float32")
-    return None
+    # This function is not used now since reset() builds the initial state.
+    pass
 
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
@@ -274,9 +264,17 @@ def copy_model_parameters(sess, estimator1, estimator2):
 
 def make_epsilon_greedy_policy(estimator, nA, sess):
     def policy_fn(observation, epsilon):
-        A = np.ones(nA, dtype="float32") * epsilon / nA
-        q_values = estimator.predict(state=[observation], sess=sess)
+        # Ensure observation is a NumPy array of shape (25,2)
+        obs = np.array(observation)
+        if obs.ndim == 1:
+            obs = obs.reshape(n_steps, 1)
+            # If we have only one channel, add a second channel of zeros.
+            obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
+        # Wrap into batch dimension.
+        batch_obs = np.expand_dims(obs, axis=0)
+        q_values = estimator.predict(batch_obs, sess=sess)
         best_action = np.argmax(q_values)
+        A = np.ones(nA, dtype="float32") * epsilon / nA
         A[best_action] += (1.0 - epsilon)
         return A
 
@@ -369,7 +367,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     lp_model = LabelSpreading()
     while True:
         env.reset()
-        # Extract the last value of each sliding window into a column vector.
         data = np.array([x[-1] for x in env.states_list]).reshape(-1, 1)
         anomaly_score = model_warm.decision_function(data)
         pred_score = [-s + 0.5 for s in anomaly_score]
@@ -575,7 +572,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     env = EnvTimeSeriesfromRepo(data_directory)
     env.action_space_n = action_space_n  # Add missing attribute.
     env.ground_truth_file = os.path.join(current_dir, "KPI_data", "test", "phase2_ground_truth.hdf")
-    env.statefnc = RNNBinaryStateFuc
+    env.statefnc = RNNBinaryStateFuc  # (Not used because reset() builds the state.)
     env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
     env.timeseries_curser_init = n_steps
     env.datasetfix = DATAFIXED
@@ -624,7 +621,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 ####################################
 # Main Experiment Loop for KPI Dataset
 ####################################
-# As reported in the paper, use active queries of 5 and 10 per episode.
+# Use active queries of 5 and 10 per episode as reported.
 for active_query in [5, 10]:
     print("Running KPI experiment with {} active queries per episode".format(active_query))
     metric = train_wrapper(active_query, active_query, 0.94)
