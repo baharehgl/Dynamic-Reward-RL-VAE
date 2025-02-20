@@ -33,7 +33,6 @@ sys.path.append(current_dir)
 class EnvTimeSeriesfromRepo:
     def __init__(self, directory):
         self.repodirext = []
-        # Collect all CSV files in the given directory.
         for fname in os.listdir(directory):
             if fname.endswith(".csv"):
                 self.repodirext.append(os.path.join(directory, fname))
@@ -42,13 +41,12 @@ class EnvTimeSeriesfromRepo:
         self.timeseries_curser = 0
         self.states_list = []
         self.timeseries = None
-        # Load the first file by default.
         self.load_data()
 
     def load_data(self):
-        # Use latin1 encoding.
-        self.timeseries = pd.read_csv(self.repodirext[self.datasetidx], usecols=[1, 2], encoding="latin1")
-        # Ensure columns for anomaly and label exist.
+        self.timeseries = pd.read_csv(self.repodirext[self.datasetidx],
+                                      usecols=[1, 2],
+                                      encoding="latin1")
         if "anomaly" not in self.timeseries.columns:
             self.timeseries["anomaly"] = -1
         if "label" not in self.timeseries.columns:
@@ -56,13 +54,11 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        n_steps = 25  # Must match global n_steps.
-        # Build sliding windows from the "value" column.
+        n_steps = 25
         self.states_list = []
         values = self.timeseries["value"].values
         for i in range(len(values) - n_steps + 1):
             self.states_list.append(values[i:i + n_steps])
-        # Create the initial state as a (25,2) array.
         state = []
         for i in range(n_steps):
             state.append([values[i], 0])
@@ -70,10 +66,9 @@ class EnvTimeSeriesfromRepo:
         return np.array(state, dtype="float32")
 
     def step(self, action):
-        # Simple stub for the step function.
         self.timeseries_curser += 1
         done = self.timeseries_curser >= len(self.timeseries)
-        reward = [0, 0]  # Placeholder reward.
+        reward = [0, 0]  # Placeholder reward
         n_steps = 25
         next_state = self.timeseries.iloc[self.timeseries_curser: self.timeseries_curser + n_steps]
         return next_state, reward, done, {}
@@ -112,7 +107,7 @@ def load_normal_data(data_path, n_steps):
     train_file = os.path.join(data_path, "phase2_train.csv")
     df = pd.read_csv(train_file, encoding="latin1")
     if "value" not in df.columns:
-        raise ValueError("Column 'value' not found in training file!")
+        raise ValueError("Column 'value' not found!")
     values = df["value"].values
     windows = []
     if len(values) >= n_steps:
@@ -262,7 +257,7 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
             obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
         if obs.shape[1] == 1:
             obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
-        batch_obs = np.expand_dims(obs, axis=0)  # shape (1,25,2)
+        batch_obs = np.expand_dims(obs, axis=0)
         q_values = estimator.predict(batch_obs, sess=sess)
         best_action = np.argmax(q_values)
         A = np.ones(nA, dtype="float32") * epsilon / nA
@@ -350,12 +345,15 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     outliers_fraction = 0.01
     MAX_WARMUP_SAMPLES = 10000
     data_train = []
+    # Collect warmup samples over a fixed number of iterations.
+    max_warmup_iters = 50
+    warmup_iter = 0
     for num in range(min(env.datasetsize, MAX_WARMUP_SAMPLES)):
         env.reset()
         data_train.extend(env.states_list)
     model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
-    while True:
+    while warmup_iter < max_warmup_iters:
         env.reset()
         data = np.array([x[-1] for x in env.states_list]).reshape(-1, 1)
         anomaly_score = model_warm.decision_function(data)
@@ -377,20 +375,17 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 labeled_index.append(sample)
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
-        # To avoid memory explosion in LabelSpreading, sample up to 1000 points.
-        idx_sample = np.random.choice(len(state_list), min(1000, len(state_list)), replace=False)
-        state_sample = state_list[idx_sample]
-        label_sample = label_list[idx_sample]
-        lp_model.fit(state_sample, label_sample)
+        lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
-        certainty_index = [idx_sample[i] for i in certainty_index if idx_sample[i] not in labeled_index]
+        certainty_index = [i for i in certainty_index if i not in labeled_index]
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
-            pseudo_label = lp_model.transduction_[np.where(idx_sample == index)[0][0]]
+            pseudo_label = lp_model.transduction_[index]
             env.timeseries.loc[index + n_steps - 1, "label"] = pseudo_label
         if len(replay_memory) >= replay_memory_init_size:
             break
+        warmup_iter += 1
 
     dynamic_coef = 10.0
     episode_rewards = []
@@ -406,7 +401,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
             print("double reset")
-        labeled_index = [i for i in range(len(env.states_list)) if env.timeseries["label"].iloc[i + n_steps - 1] != -1]
+        labeled_index = [i for i in range(len(env.states_list))
+                         if env.timeseries["label"].iloc[i + n_steps - 1] != -1]
         al = active_learning(env, N=num_active_learning, strategy="margin_sampling",
                              estimator=qlearn_estimator, already_selected=labeled_index)
         al_samples = al.get_samples()
