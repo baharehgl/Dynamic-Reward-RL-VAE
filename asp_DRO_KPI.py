@@ -56,13 +56,13 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        n_steps = 25  # Must match global n_steps
-        # Build sliding windows (states_list) from the "value" column.
+        n_steps = 25  # Must match global n_steps.
+        # Build sliding windows from the "value" column.
         self.states_list = []
         values = self.timeseries["value"].values
         for i in range(len(values) - n_steps + 1):
             self.states_list.append(values[i:i + n_steps])
-        # Create initial state as a (25,2) array.
+        # Create the initial state as a (25,2) array.
         state = []
         for i in range(n_steps):
             state.append([values[i], 0])
@@ -70,10 +70,10 @@ class EnvTimeSeriesfromRepo:
         return np.array(state, dtype="float32")
 
     def step(self, action):
-        # Simple stub for step function.
+        # Simple stub for the step function.
         self.timeseries_curser += 1
         done = self.timeseries_curser >= len(self.timeseries)
-        reward = [0, 0]  # Placeholder reward
+        reward = [0, 0]  # Placeholder reward.
         n_steps = 25
         next_state = self.timeseries.iloc[self.timeseries_curser: self.timeseries_curser + n_steps]
         return next_state, reward, done, {}
@@ -256,16 +256,13 @@ def copy_model_parameters(sess, estimator1, estimator2):
 
 def make_epsilon_greedy_policy(estimator, nA, sess):
     def policy_fn(observation, epsilon):
-        # Ensure observation has shape (25,2)
         obs = np.array(observation)
         if obs.ndim == 1:
-            # If it's 1D, reshape to (n_steps, 1) and add a zero channel.
             obs = obs.reshape(n_steps, 1)
             obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
-        # If observation has shape (25,1), then add a second channel.
         if obs.shape[1] == 1:
             obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
-        batch_obs = np.expand_dims(obs, axis=0)  # shape becomes (1,25,2)
+        batch_obs = np.expand_dims(obs, axis=0)  # shape (1,25,2)
         q_values = estimator.predict(batch_obs, sess=sess)
         best_action = np.argmax(q_values)
         A = np.ones(nA, dtype="float32") * epsilon / nA
@@ -315,7 +312,6 @@ class active_learning(object):
 class WarmUp(object):
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
-        # Extract the last value from each sliding window.
         data = np.array([x[-1] for x in X_train]).reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
@@ -367,9 +363,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
         state_list = np.array(env.states_list)
-        # Build label_list so that for each sliding window i, label = timeseries["label"].iloc[i+n_steps-1]
         label_list = np.array([env.timeseries["label"].iloc[i + n_steps - 1] for i in range(len(env.states_list))])
-        # labeled_index: indices for which label is not -1
         labeled_index = [i for i in range(len(label_list)) if label_list[i] != -1]
         for sample in warm_samples:
             if sample < len(env.states_list):
@@ -377,21 +371,24 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-                # Use .loc to avoid copy warnings.
                 env.timeseries.loc[env.timeseries_curser, "label"] = env.timeseries.loc[
                     env.timeseries_curser, "anomaly"]
                 num_label += 1
                 labeled_index.append(sample)
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
-        lp_model.fit(state_list, label_list)
+        # To avoid memory explosion in LabelSpreading, sample up to 1000 points.
+        idx_sample = np.random.choice(len(state_list), min(1000, len(state_list)), replace=False)
+        state_sample = state_list[idx_sample]
+        label_sample = label_list[idx_sample]
+        lp_model.fit(state_sample, label_sample)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
-        certainty_index = [i for i in certainty_index if i not in labeled_index]
+        certainty_index = [idx_sample[i] for i in certainty_index if idx_sample[i] not in labeled_index]
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
-            pseudo_label = lp_model.transduction_[index]
-            env.timeseries.loc[index + n_steps, "label"] = pseudo_label
+            pseudo_label = lp_model.transduction_[np.where(idx_sample == index)[0][0]]
+            env.timeseries.loc[index + n_steps - 1, "label"] = pseudo_label
         if len(replay_memory) >= replay_memory_init_size:
             break
 
