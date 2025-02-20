@@ -6,7 +6,6 @@ import itertools
 import numpy as np
 import pandas as pd
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy import stats
@@ -24,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment.
+# Import the environment. Make sure env1.py only reads CSV and doesn't require PyTables.
 from env1 import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -40,8 +39,8 @@ EPSILON = 0.5  # epsilon-greedy parameter
 EPSILON_DECAY = 1.00  # epsilon decay
 
 # Extrinsic reward values (heuristic):
-TN_Value = 1  # True Negative
-TP_Value = 5  # True Positive
+TN_Value = 1   # True Negative
+TP_Value = 5   # True Positive
 FP_Value = -1  # False Positive
 FN_Value = -5  # False Negative
 
@@ -50,19 +49,17 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # sliding window length
-n_input_dim = 2  # dimension of input to LSTM
-n_hidden_dim = 128  # hidden dimension
+n_steps = 25         # sliding window length
+n_input_dim = 2      # dimension of input to LSTM
+n_hidden_dim = 128   # hidden dimension
 
 validation_separate_ratio = 0.9
-
 
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
     """
-    Loads normal time series data from CSV files.
-    For KPI, it will scan the KPI_data/train folder for CSV files (e.g. phase2_train.csv)
-    and extract sliding windows from the 'value' column.
+    Loads normal time series data from CSV files in KPI_data/train.
+    Extracts sliding windows from the 'value' column.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
     windows = []
@@ -80,7 +77,6 @@ def load_normal_data(data_path, n_steps):
     scaled_windows = scaler.fit_transform(windows)
     return scaled_windows
 
-
 class Sampling(layers.Layer):
     def call(self, inputs):
         z_mean, z_log_var = inputs
@@ -88,7 +84,6 @@ class Sampling(layers.Layer):
         dim = tf.shape(z_mean)[1]
         epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
-
 
 def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     inputs = layers.Input(shape=(original_dim,))
@@ -113,13 +108,11 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-
 original_dim = n_steps
 latent_dim = 10
 intermediate_dim = 64
 
 vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
-
 
 #####################################################
 # State and Reward Functions.
@@ -139,7 +132,6 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
     return None
 
-
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
@@ -155,7 +147,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
     else:
         return [0, 0]
 
-
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
@@ -163,7 +154,6 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
         elif timeseries['anomaly'][timeseries_curser] == 1:
             return [FN_Value, TP_Value]
     return [0, 0]
-
 
 # ----------------------------
 # Q-value Function Approximator.
@@ -185,8 +175,7 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[
-                0]
+            global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0]
             self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
             self.summaries = tf.compat.v1.summary.merge([
                 tf.compat.v1.summary.histogram("loss_hist", self.losses),
@@ -215,7 +204,6 @@ class Q_Estimator_Nonlinear():
             self.summary_writer.add_summary(summaries, global_step)
         return
 
-
 def copy_model_parameters(sess, estimator1, estimator2):
     e1_params = sorted([t for t in tf.compat.v1.trainable_variables() if t.name.startswith(estimator1.scope)],
                        key=lambda v: v.name)
@@ -224,7 +212,6 @@ def copy_model_parameters(sess, estimator1, estimator2):
     for e1_v, e2_v in zip(e1_params, e2_params):
         sess.run(e2_v.assign(e1_v))
 
-
 def make_epsilon_greedy_policy(estimator, nA, sess):
     def policy_fn(observation, epsilon):
         A = np.ones(nA, dtype='float32') * epsilon / nA
@@ -232,15 +219,12 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
         best_action = np.argmax(q_values)
         A[best_action] += (1.0 - epsilon)
         return A
-
     return policy_fn
-
 
 def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward=100.0, alpha=0.01, min_coef=0.1,
                                      max_coef=10.0):
     new_coef = current_coef + alpha * (target_reward - episode_reward)
     return max(min(new_coef, max_coef), min_coef)
-
 
 # --- Updated active_learning class ---
 class active_learning(object):
@@ -282,7 +266,6 @@ class active_learning(object):
             self.env.timeseries.loc[sample + n_steps - 1, 'anomaly'] = float(label)
         return
 
-
 class WarmUp(object):
     def warm_up_SVM(self, outliers_fraction, N):
         states_list = self.env.get_states_list()
@@ -298,12 +281,29 @@ class WarmUp(object):
         from sklearn.ensemble import IsolationForest
         X_train_arr = np.array(X_train)
         data = X_train_arr[:, -1].reshape(-1, 1)
-        from sklearn.ensemble import IsolationForest
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
 
+#######################################
+# Helper to subsample before label propagation
+MAX_LABELPROP_SAMPLES = 10000
 
+def fit_labelprop_subsample(lp_model, states_list, labels_list):
+    """
+    Fits LabelPropagation or LabelSpreading on a random subset of data
+    if the dataset is larger than MAX_LABELPROP_SAMPLES.
+    """
+    n = len(states_list)
+    if n > MAX_LABELPROP_SAMPLES:
+        idxs = np.random.choice(n, MAX_LABELPROP_SAMPLES, replace=False)
+        states_sub = [states_list[i] for i in idxs]
+        labels_sub = labels_list[idxs]
+        lp_model.fit(states_sub, labels_sub)
+    else:
+        lp_model.fit(states_list, labels_list)
+
+#######################################
 def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_epoches,
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
@@ -355,6 +355,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+                # Mark label
                 env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
                 num_label += 1
                 labeled_index.append(sample)
@@ -362,7 +363,9 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
-        lp_model.fit(state_list, label_list)
+        # -------- Subsample approach to label propagation -----------
+        fit_labelprop_subsample(lp_model, state_list, label_list)
+        # ------------------------------------------------------------
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
         certainty_index = [i for i in certainty_index if i not in labeled_index]
@@ -420,7 +423,9 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.append(Transition(state, reward, next_state, done))
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
-        lp_model.fit(state_list, label_list)
+        # -------- Subsample approach to label propagation -----------
+        fit_labelprop_subsample(lp_model, state_list, label_list)
+        # ------------------------------------------------------------
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
         certainty_index = [i for i in certainty_index if i in unlabeled_indices]
@@ -464,7 +469,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         coef_history.append(dynamic_coef)
     return episode_rewards, coef_history
 
-
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     from sklearn.metrics import precision_recall_fscore_support
     rec_file = open(record_dir + 'performance.txt', 'w')
@@ -498,14 +502,12 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             if done:
                 break
             state = next_state[action]
-        precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary',
-                                                                   zero_division=0)
+        precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
         precision_all.append(precision)
         recall_all.append(recall)
         f1_all.append(f1)
-        print("Episode {}: Precision:{}, Recall:{}, F1-score:{}".format(i_episode + 1, precision, recall, f1))
-        rec_file.write(
-            "Episode {}: Precision:{}, Recall:{}, F1-score:{}\n".format(i_episode + 1, precision, recall, f1))
+        print("Episode {}: Precision:{}, Recall:{}, F1-score:{}".format(i_episode+1, precision, recall, f1))
+        rec_file.write("Episode {}: Precision:{}, Recall:{}, F1-score:{}\n".format(i_episode+1, precision, recall, f1))
         if plot:
             f, axarr = plt.subplots(3, sharex=True)
             axarr[0].plot(ts_values)
@@ -520,7 +522,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     avg_f1 = np.mean(f1_all)
     print("Average F1-score over {} episodes: {}".format(num_episodes, avg_f1))
     return avg_f1
-
 
 def save_plots(experiment_dir, episode_rewards, coef_history):
     plot_dir = os.path.join(experiment_dir, "plots")
@@ -541,32 +542,31 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.savefig(os.path.join(plot_dir, "dynamic_coef_curve.png"))
     plt.close()
 
-
 ###############################################
 # Train wrapper for KPI dataset.
 def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
-    test = 0  # set test mode flag (0 means training mode)
-    # Load VAE training data from KPI_data/train (expects phase2_train.csv)
+    test = 0  # training mode
+    # Load VAE training data from KPI_data/train (expects phase2_train.csv).
+    # This part remains the same as before, just ensures we have a trained VAE.
     train_data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(train_data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=2, batch_size=32)
+    vae.fit(x_train, epochs=2, batch_size=32)  # set epochs=2 for demonstration; use more in real training
     vae.save('vae_model.h5')
-    # Use labeled_percentage for training (e.g., 0.0005 for 0.05% and 0.001 for 0.1%)
     percentage = [labeled_percentage]
     # Set dataset directories for training and testing.
     train_dataset_dir = os.path.join(current_dir, "KPI_data", "train")
     test_dataset_dir = os.path.join(current_dir, "KPI_data", "test")
     for j in range(len(percentage)):
         exp_relative_dir = ['KPI_LP_{}_AL_{}_d{}'.format(num_LP, num_AL, discount_factor)]
-        # Create training environment (ensure EnvTimeSeriesfromRepo is adapted for KPI CSV format)
+        # Create training environment (ensure EnvTimeSeriesfromRepo is adapted for CSV).
         env = EnvTimeSeriesfromRepo(train_dataset_dir)
         env.statefnc = RNNBinaryStateFuc
         env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
         env.timeseries_curser_init = n_steps
         env.datasetfix = DATAFIXED
         env.datasetidx = 0
-        # Create test environment using KPI test ground truth (expects phase2_ground_truth.hdf)
+        # Create test environment using CSV in KPI_data/test (converted from HDF).
         env_test = EnvTimeSeriesfromRepo(test_dataset_dir)
         env_test.statefnc = RNNBinaryStateFuc
         env_test.rewardfnc = RNNBinaryRewardFucTest
@@ -605,7 +605,6 @@ def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
                                                 experiment_dir)
         save_plots(experiment_dir, episode_rewards, coef_history)
         return final_metric
-
 
 ###############################################
 # Run experiments for 0.05% and 0.1% labeled data.
