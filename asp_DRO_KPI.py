@@ -9,14 +9,13 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from collections import deque, namedtuple
+from collections import namedtuple
 from scipy import stats
 import tensorflow as tf
 from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import OneClassSVM
-from sklearn.semi_supervised import LabelPropagation, LabelSpreading
+from sklearn.semi_supervised import LabelSpreading
 
 tf.compat.v1.disable_eager_execution()
 
@@ -57,15 +56,13 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        n_steps = 25  # must match global n_steps
-        # Build sliding windows from the "value" column.
+        n_steps = 25  # Must match global n_steps
+        # Build sliding windows (states_list) from the "value" column.
         self.states_list = []
-        # We use .iloc to ensure we get values in order.
-        values = self.timeseries["value"].iloc[:].values
+        values = self.timeseries["value"].values
         for i in range(len(values) - n_steps + 1):
             self.states_list.append(values[i:i + n_steps])
-        # Create the initial state as a (25,2) array.
-        # For the initial state, we set the first 24 rows to have second column 0, and the last row to have 1.
+        # Create initial state as a (25,2) array.
         state = []
         for i in range(n_steps):
             state.append([values[i], 0])
@@ -73,10 +70,10 @@ class EnvTimeSeriesfromRepo:
         return np.array(state, dtype="float32")
 
     def step(self, action):
-        # Simple stub for the step function.
+        # Simple stub for step function.
         self.timeseries_curser += 1
         done = self.timeseries_curser >= len(self.timeseries)
-        reward = [0, 0]  # placeholder reward
+        reward = [0, 0]  # Placeholder reward
         n_steps = 25
         next_state = self.timeseries.iloc[self.timeseries_curser: self.timeseries_curser + n_steps]
         return next_state, reward, done, {}
@@ -168,22 +165,17 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 
 
 ####################################
-# State and Reward Functions
+# Reward Functions
 ####################################
-def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
-    # This function is not used now since reset() builds the initial state.
-    pass
-
-
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries["value"][timeseries_curser - n_steps: timeseries_curser]])
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
         vae_penalty = dynamic_coef * reconstruction_error
-        if timeseries["label"][timeseries_curser] == 0:
+        if timeseries["label"].iloc[timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
-        elif timeseries["label"][timeseries_curser] == 1:
+        elif timeseries["label"].iloc[timeseries_curser] == 1:
             return [FN_Value + vae_penalty, TP_Value + vae_penalty]
         else:
             return [0, 0]
@@ -193,9 +185,9 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
 
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
-        if timeseries["anomaly"][timeseries_curser] == 0:
+        if timeseries["anomaly"].iloc[timeseries_curser] == 0:
             return [TN_Value, FP_Value]
-        elif timeseries["anomaly"][timeseries_curser] == 1:
+        elif timeseries["anomaly"].iloc[timeseries_curser] == 1:
             return [FN_Value, TP_Value]
     return [0, 0]
 
@@ -264,14 +256,16 @@ def copy_model_parameters(sess, estimator1, estimator2):
 
 def make_epsilon_greedy_policy(estimator, nA, sess):
     def policy_fn(observation, epsilon):
-        # Ensure observation is a NumPy array of shape (25,2)
+        # Ensure observation has shape (25,2)
         obs = np.array(observation)
         if obs.ndim == 1:
+            # If it's 1D, reshape to (n_steps, 1) and add a zero channel.
             obs = obs.reshape(n_steps, 1)
-            # If we have only one channel, add a second channel of zeros.
             obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
-        # Wrap into batch dimension.
-        batch_obs = np.expand_dims(obs, axis=0)
+        # If observation has shape (25,1), then add a second channel.
+        if obs.shape[1] == 1:
+            obs = np.hstack((obs, np.zeros((n_steps, 1), dtype=obs.dtype)))
+        batch_obs = np.expand_dims(obs, axis=0)  # shape becomes (1,25,2)
         q_values = estimator.predict(batch_obs, sess=sess)
         best_action = np.argmax(q_values)
         A = np.ones(nA, dtype="float32") * epsilon / nA
@@ -373,20 +367,23 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
         state_list = np.array(env.states_list)
-        labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries["label"])) if
-                         env.timeseries["label"][i] != -1]
+        # Build label_list so that for each sliding window i, label = timeseries["label"].iloc[i+n_steps-1]
+        label_list = np.array([env.timeseries["label"].iloc[i + n_steps - 1] for i in range(len(env.states_list))])
+        # labeled_index: indices for which label is not -1
+        labeled_index = [i for i in range(len(label_list)) if label_list[i] != -1]
         for sample in warm_samples:
             if sample < len(env.states_list):
                 state = env.states_list[sample]
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-                env.timeseries["label"][env.timeseries_curser] = env.timeseries["anomaly"][env.timeseries_curser]
+                # Use .loc to avoid copy warnings.
+                env.timeseries.loc[env.timeseries_curser, "label"] = env.timeseries.loc[
+                    env.timeseries_curser, "anomaly"]
                 num_label += 1
                 labeled_index.append(sample)
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
-        label_list = np.array([env.timeseries["label"][i] for i in range(n_steps, len(env.timeseries["label"]))])
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
@@ -394,7 +391,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
-            env.timeseries["label"][index + n_steps] = pseudo_label
+            env.timeseries.loc[index + n_steps, "label"] = pseudo_label
         if len(replay_memory) >= replay_memory_init_size:
             break
 
@@ -412,8 +409,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
             print("double reset")
-        labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries["label"])) if
-                         env.timeseries["label"][i] != -1]
+        labeled_index = [i for i in range(len(env.states_list)) if env.timeseries["label"].iloc[i + n_steps - 1] != -1]
         al = active_learning(env, N=num_active_learning, strategy="margin_sampling",
                              estimator=qlearn_estimator, already_selected=labeled_index)
         al_samples = al.get_samples()
@@ -421,10 +417,11 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         labeled_index.extend(al_samples)
         num_label += len(al_samples)
         state_list = np.array(env.states_list)
-        label_list = np.array([env.timeseries["label"][i] for i in range(n_steps, len(env.timeseries["label"]))])
+        label_list = np.array([env.timeseries["label"].iloc[i + n_steps - 1] for i in range(len(env.states_list))])
         for new_sample in al_samples:
-            label_list[new_sample] = env.timeseries["anomaly"][new_sample + n_steps]
-            env.timeseries["label"][new_sample + n_steps] = env.timeseries["anomaly"][new_sample + n_steps]
+            label_list[new_sample] = env.timeseries["anomaly"].iloc[new_sample + n_steps - 1]
+            env.timeseries.loc[new_sample + n_steps - 1, "label"] = env.timeseries["anomaly"].iloc[
+                new_sample + n_steps - 1]
         for sample in labeled_index:
             if sample < len(env.states_list):
                 env.timeseries_curser = sample + n_steps
@@ -444,7 +441,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
-            env.timeseries["label"][index + n_steps] = pseudo_label
+            env.timeseries.loc[index + n_steps - 1, "label"] = pseudo_label
         per_loop_time2 = time.time()
         for i_epoch in range(num_epoches):
             if qlearn_estimator.summary_writer:
@@ -561,25 +558,22 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
 # Train Wrapper for KPI Dataset Only
 ####################################
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Use KPI training data.
     data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
     vae.fit(x_train, epochs=2, batch_size=32)
     vae.save("vae_model.h5")
 
-    # Set up environment.
     env = EnvTimeSeriesfromRepo(data_directory)
-    env.action_space_n = action_space_n  # Add missing attribute.
+    env.action_space_n = action_space_n
     env.ground_truth_file = os.path.join(current_dir, "KPI_data", "test", "phase2_ground_truth.hdf")
-    env.statefnc = RNNBinaryStateFuc  # (Not used because reset() builds the state.)
     env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
     env.timeseries_curser_init = n_steps
     env.datasetfix = DATAFIXED
     env.datasetidx = 0
     env_test = env
     env_test.rewardfnc = RNNBinaryRewardFucTest
-    env.datasetrng = int(env.datasetsize * 1)  # Use full dataset.
+    env.datasetrng = int(env.datasetsize)
 
     exp_relative_dir = "KPI_LP_1500init_warmup_h128_b256_300ep_num_LP{}_num_AL{}_d{}".format(num_LP, num_AL,
                                                                                              discount_factor)
@@ -621,7 +615,6 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 ####################################
 # Main Experiment Loop for KPI Dataset
 ####################################
-# Use active queries of 5 and 10 per episode as reported.
 for active_query in [5, 10]:
     print("Running KPI experiment with {} active queries per episode".format(active_query))
     metric = train_wrapper(active_query, active_query, 0.94)
