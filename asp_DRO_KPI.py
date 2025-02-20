@@ -57,22 +57,22 @@ class EnvTimeSeriesfromRepo:
 
     def reset(self):
         self.timeseries_curser = 0
-        n_steps = 25  # Must match global n_steps
+        n_steps = 25  # Must match global n_steps below.
         # Create sliding windows (states_list) from the "value" column.
         self.states_list = []
         values = self.timeseries["value"].values
         for i in range(len(values) - n_steps + 1):
             self.states_list.append(values[i:i + n_steps])
-        # Return the first n_steps rows as the initial state (as a DataFrame slice).
+        # Return the first n_steps rows as the initial state (DataFrame slice).
         return self.timeseries.iloc[0:n_steps]
 
     def step(self, action):
         # Simple stub for the step function.
         self.timeseries_curser += 1
         done = self.timeseries_curser >= len(self.timeseries)
-        reward = [0, 0]  # Placeholder reward; replace with your actual logic.
+        reward = [0, 0]  # Placeholder reward; replace with actual logic.
         n_steps = 25
-        next_state = self.timeseries.iloc[self.timeseries_curser: self.timeseries_curser + n_steps]
+        next_state = self.timeseries.iloc[self.timeseries_curser:self.timeseries_curser + n_steps]
         return next_state, reward, done, {}
 
 
@@ -324,13 +324,8 @@ class WarmUp(object):
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
         X_train_arr = np.array(X_train)
-        # If X_train_arr is 1D, reshape it; otherwise, use the last element of each sample.
-        if X_train_arr.ndim == 1:
-            data = X_train_arr.reshape(-1, 1)
-        else:
-            # If X_train_arr is 2D, assume each row is a sample.
-            # In our case, X_train_arr is a list of sliding windows, so we take the last value of each window.
-            data = np.array([x[-1] for x in X_train_arr]).reshape(-1, 1)
+        # For each sliding window (each sample in X_train_arr), take its last value.
+        data = np.array([x[-1] for x in X_train_arr]).reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
@@ -370,18 +365,19 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     data_train = []
     for num in range(min(env.datasetsize, MAX_WARMUP_SAMPLES)):
         env.reset()
-        # Ensure states_list is updated.
         data_train.extend(env.states_list)
     model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
     while True:
         env.reset()
-        data = np.array(env.states_list).transpose(2, 0, 1).reshape(2, -1)[0].reshape(-1, n_steps)[:, -1].reshape(-1, 1)
+        data = np.array([x[-1] for x in env.states_list]).reshape(-1, n_steps)[:, -1].reshape(-1, 1)
+        # Alternatively, since each window is of length n_steps, we can simply extract the last value:
+        # data = np.array([x[-1] for x in env.states_list]).reshape(-1, 1)
         anomaly_score = model_warm.decision_function(data)
         pred_score = [-s + 0.5 for s in anomaly_score]
         warm_samples = np.argsort(pred_score)[:5]
         warm_samples = np.append(warm_samples, np.argsort(pred_score)[-5:])
-        state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
+        state_list = np.array(env.states_list)
         labeled_index = [i - n_steps for i in range(n_steps, len(env.timeseries["label"])) if
                          env.timeseries["label"][i] != -1]
         for sample in warm_samples:
@@ -429,7 +425,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         print("Labeling samples: {} in env {}".format(al_samples, env.datasetidx))
         labeled_index.extend(al_samples)
         num_label += len(al_samples)
-        state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
+        state_list = np.array(env.states_list)
         label_list = np.array([env.timeseries["label"][i] for i in range(n_steps, len(env.timeseries["label"]))])
         for new_sample in al_samples:
             label_list[new_sample] = env.timeseries["anomaly"][new_sample + n_steps]
