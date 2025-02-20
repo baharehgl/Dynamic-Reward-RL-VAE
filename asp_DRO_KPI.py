@@ -323,9 +323,8 @@ class active_learning(object):
 class WarmUp(object):
     def warm_up_isolation_forest(self, outliers_fraction, X_train):
         from sklearn.ensemble import IsolationForest
-        X_train_arr = np.array(X_train)
-        # For each sliding window (each sample in X_train_arr), take its last value.
-        data = np.array([x[-1] for x in X_train_arr]).reshape(-1, 1)
+        # Extract the last value from each sliding window.
+        data = np.array([x[-1] for x in X_train]).reshape(-1, 1)
         clf = IsolationForest(contamination=outliers_fraction)
         clf.fit(data)
         return clf
@@ -370,9 +369,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     lp_model = LabelSpreading()
     while True:
         env.reset()
-        data = np.array([x[-1] for x in env.states_list]).reshape(-1, n_steps)[:, -1].reshape(-1, 1)
-        # Alternatively, since each window is of length n_steps, we can simply extract the last value:
-        # data = np.array([x[-1] for x in env.states_list]).reshape(-1, 1)
+        # Extract the last value of each sliding window into a column vector.
+        data = np.array([x[-1] for x in env.states_list]).reshape(-1, 1)
         anomaly_score = model_warm.decision_function(data)
         pred_score = [-s + 0.5 for s in anomaly_score]
         warm_samples = np.argsort(pred_score)[:5]
