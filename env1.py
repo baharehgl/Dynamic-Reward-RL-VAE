@@ -17,7 +17,6 @@ action_space = [NOT_ANOMALY, ANOMALY]
 def defaultStateFuc(timeseries, timeseries_curser, previous_state=None, action=None):
     """
     Default state function: returns the value at the current time index.
-    In your RL setup, you can replace this with a sliding-window state function.
     """
     return timeseries['value'][timeseries_curser]
 
@@ -35,12 +34,15 @@ def defaultRewardFuc(timeseries, timeseries_curser, action):
 
 class EnvTimeSeriesfromRepo():
     def __init__(self, repodir='environment/time_series_repo/'):
-        # Get all CSV file paths in the repository directory.
+        # Get all CSV file paths in the repository directory, but skip files in __MACOSX or hidden files.
         self.repodir = repodir
         self.repodirext = []
         for subdir, dirs, files in os.walk(self.repodir):
+            # Skip __MACOSX directory
+            if '__MACOSX' in subdir:
+                continue
             for file in files:
-                if file.endswith('.csv'):
+                if file.endswith('.csv') and not file.startswith('._'):
                     self.repodirext.append(os.path.join(subdir, file))
 
         # Check that CSV files were found.
@@ -65,7 +67,7 @@ class EnvTimeSeriesfromRepo():
             fname = os.path.basename(self.repodirext[i])
             try:
                 if "phase2_train" in fname:
-                    # For KPI training file: assume it has two (or more) columns (e.g. an id, a value, etc.)
+                    # For KPI training file: assume it has at least two columns.
                     ts = pd.read_csv(self.repodirext[i], encoding='latin1')
                     # If there's no 'value' column, assume the second column is the value.
                     if 'value' not in ts.columns:
@@ -74,11 +76,11 @@ class EnvTimeSeriesfromRepo():
                             ts.rename(columns={cols[1]: 'value'}, inplace=True)
                         else:
                             raise ValueError("File {} does not contain enough columns.".format(self.repodirext[i]))
-                    # Convert the 'value' column to numeric (coerce errors to NaN) and drop rows with NaN.
+                    # Convert 'value' to numeric, drop rows with errors.
                     ts['value'] = pd.to_numeric(ts['value'], errors='coerce')
                     ts = ts.dropna(subset=['value'])
                     ts['value'] = ts['value'].astype(np.float32)
-                    # For KPI training, we might not have anomaly info; set it to 0.
+                    # For training, we might not have anomaly info; set it to 0.
                     ts['anomaly'] = 0
                     ts['label'] = -1
                 else:
@@ -88,7 +90,6 @@ class EnvTimeSeriesfromRepo():
                                      header=0,
                                      names=['value', 'anomaly'],
                                      encoding='latin1')
-                    # Convert 'value' column to numeric and drop invalid rows.
                     ts['value'] = pd.to_numeric(ts['value'], errors='coerce')
                     ts = ts.dropna(subset=['value'])
                     ts['value'] = ts['value'].astype(np.float32)
@@ -164,21 +165,16 @@ class EnvTimeSeriesfromRepo():
         Take a step in the environment.
         Returns a tuple: (state, reward, done, info)
         """
-        # 1. Get the reward based on the current state and the given action.
         reward = self.rewardfnc(self.timeseries, self.timeseries_curser, action)
-        # 2. Advance the time series cursor.
         self.timeseries_curser += 1
 
         if self.timeseries_curser >= self.timeseries['value'].size:
             done = 1
-            # At terminal state, return the same state twice.
             state = np.array([self.timeseries_states, self.timeseries_states])
         else:
             done = 0
-            # Compute the next state.
             state = self.statefnc(self.timeseries, self.timeseries_curser, self.timeseries_states, action)
 
-        # Update the stored state.
         if isinstance(state, np.ndarray) and state.ndim > np.array(self.timeseries_states).ndim:
             self.timeseries_states = state[action]
         else:
@@ -198,7 +194,6 @@ class EnvTimeSeriesfromRepo():
                 state = self.statefnc(self.timeseries, cursor)
             else:
                 state = self.statefnc(self.timeseries, cursor, state_list[-1])
-                # If the state function returns multiple states (e.g., for binary branching), take the first one.
                 if isinstance(state, np.ndarray) and state.ndim > 1:
                     state = state[0]
             state_list.append(state)
