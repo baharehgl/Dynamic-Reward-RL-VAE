@@ -19,11 +19,9 @@ from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
 
-# Append current directory to sys.path so local modules can be imported.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment. Make sure env1.py only reads CSV, not HDF.
 from env1 import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -32,35 +30,30 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
-DATAFIXED = 0  # whether target is fixed to a single time series
-EPISODES = 300  # number of episodes (for demonstration)
-DISCOUNT_FACTOR = 0.5  # reward discount factor
-EPSILON = 0.5  # epsilon-greedy parameter
-EPSILON_DECAY = 1.00  # epsilon decay
+DATAFIXED = 0
+EPISODES = 300
+DISCOUNT_FACTOR = 0.5
+EPSILON = 0.5
+EPSILON_DECAY = 1.00
 
-# Extrinsic reward values (heuristic):
-TN_Value = 1   # True Negative
-TP_Value = 5   # True Positive
-FP_Value = -1  # False Positive
-FN_Value = -5  # False Negative
+TN_Value = 1
+TP_Value = 5
+FP_Value = -1
+FN_Value = -5
 
 NOT_ANOMALY = 0
 ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25         # sliding window length
-n_input_dim = 2      # dimension of input to LSTM
-n_hidden_dim = 128   # hidden dimension
+n_steps = 25
+n_input_dim = 2
+n_hidden_dim = 128
 
 validation_separate_ratio = 0.9
 
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
-    """
-    Loads normal time series data from CSV files in KPI_data/train.
-    Extracts sliding windows from the 'value' column.
-    """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.csv')]
     windows = []
     for file in all_files:
@@ -155,8 +148,6 @@ def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
             return [FN_Value, TP_Value]
     return [0, 0]
 
-# ----------------------------
-# Q-value Function Approximator.
 class Q_Estimator_Nonlinear():
     def __init__(self, learning_rate=np.float32(0.01), scope="Q_Estimator_Nonlinear", summaries_dir=None):
         self.scope = scope
@@ -226,7 +217,6 @@ def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward
     new_coef = current_coef + alpha * (target_reward - episode_reward)
     return max(min(new_coef, max_coef), min_coef)
 
-# --- Updated active_learning class ---
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
@@ -285,15 +275,9 @@ class WarmUp(object):
         clf.fit(data)
         return clf
 
-#######################################
-# Helper to subsample before label propagation
 MAX_LABELPROP_SAMPLES = 10000
 
 def fit_labelprop_subsample(lp_model, states_list, labels_list):
-    """
-    Fits LabelPropagation or LabelSpreading on a random subset of data
-    if the dataset is larger than MAX_LABELPROP_SAMPLES.
-    """
     n = len(states_list)
     if n > MAX_LABELPROP_SAMPLES:
         idxs = np.random.choice(n, MAX_LABELPROP_SAMPLES, replace=False)
@@ -303,12 +287,12 @@ def fit_labelprop_subsample(lp_model, states_list, labels_list):
     else:
         lp_model.fit(states_list, labels_list)
 
-#######################################
 def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_epoches,
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
                num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None):
+    from collections import namedtuple
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -338,6 +322,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         data_train.extend(env.states_list)
     model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
+
     for t in itertools.count():
         env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
@@ -355,7 +340,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-                # Use .loc to avoid SettingWithCopyWarning
                 env.timeseries.loc[env.timeseries_curser, 'label'] = env.timeseries.loc[env.timeseries_curser, 'anomaly']
                 num_label += 1
                 labeled_index.append(sample)
@@ -363,7 +347,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
-        # Subsample approach to label propagation
         fit_labelprop_subsample(lp_model, state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
@@ -406,9 +389,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
         for new_sample in al_samples:
-            # Update label_list array
             label_list[new_sample] = env.timeseries.loc[new_sample + n_steps, 'anomaly']
-            # Update environment's DataFrame using .loc
             env.timeseries.loc[new_sample + n_steps, 'label'] = env.timeseries.loc[new_sample + n_steps, 'anomaly']
         for sample in labeled_index:
             if sample < len(env.states_list):
@@ -540,32 +521,24 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.savefig(os.path.join(plot_dir, "dynamic_coef_curve.png"))
     plt.close()
 
-###############################################
-# Train wrapper for KPI dataset.
 def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
     test = 0  # training mode
-    # Load VAE training data from KPI_data/train (expects phase2_train.csv).
     train_data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(train_data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    # For demonstration, let's do fewer epochs. Adjust as needed.
     vae.fit(x_train, epochs=2, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [labeled_percentage]
-    # Set dataset directories for training and testing.
     train_dataset_dir = os.path.join(current_dir, "KPI_data", "train")
     test_dataset_dir = os.path.join(current_dir, "KPI_data", "test")
     for j in range(len(percentage)):
         exp_relative_dir = ['KPI_LP_{}_AL_{}_d{}'.format(num_LP, num_AL, discount_factor)]
-        # Create training environment
         env = EnvTimeSeriesfromRepo(train_dataset_dir)
         env.statefnc = RNNBinaryStateFuc
         env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
         env.timeseries_curser_init = n_steps
         env.datasetfix = DATAFIXED
         env.datasetidx = 0
-
-        # Create test environment
         env_test = EnvTimeSeriesfromRepo(test_dataset_dir)
         env_test.statefnc = RNNBinaryStateFuc
         env_test.rewardfnc = RNNBinaryRewardFucTest
@@ -573,7 +546,6 @@ def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
         if test == 1:
             env.datasetrng = env.datasetsize
         else:
-            # Force datasetrng to be at least 1
             calc_rng = int(env.datasetsize * float(percentage[j]))
             env.datasetrng = max(1, calc_rng)
 
@@ -609,13 +581,12 @@ def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
         save_plots(experiment_dir, episode_rewards, coef_history)
         return final_metric
 
-###############################################
-# Run experiments for 0.05% and 0.1% labeled data.
 if __name__ == '__main__':
-    print("Running KPI experiment with 0.05% labeled data...")
-    final_metric_005 = train_wrapper_kpi(100, 30, 0.92, 0.0005)
-    print("Final metric for 0.05% labeled data:", final_metric_005)
+    # Instead of 0.0005 and 0.001, we use 0.01 (1%) and 0.05 (5%)
+    print("Running KPI experiment with 1% labeled data...")
+    final_metric_1p = train_wrapper_kpi(100, 30, 0.92, 0.01)
+    print("Final metric for 1% labeled data:", final_metric_1p)
 
-    print("Running KPI experiment with 0.1% labeled data...")
-    final_metric_01 = train_wrapper_kpi(100, 30, 0.92, 0.001)
-    print("Final metric for 0.1% labeled data:", final_metric_01)
+    print("Running KPI experiment with 5% labeled data...")
+    final_metric_5p = train_wrapper_kpi(100, 30, 0.92, 0.05)
+    print("Final metric for 5% labeled data:", final_metric_5p)
