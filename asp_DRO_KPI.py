@@ -22,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
+# Make sure env1.py only reads CSV (no HDF) and that you have at least 1 CSV in train/test
 from env1 import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -278,6 +279,22 @@ class WarmUp(object):
 MAX_LABELPROP_SAMPLES = 10000
 
 def fit_labelprop_subsample(lp_model, states_list, labels_list):
+    """
+    Modified to skip if there's no labeled data or only one class.
+    """
+    # Count labeled samples
+    labeled_mask = (labels_list != -1)
+    labeled_count = np.count_nonzero(labeled_mask)
+    if labeled_count < 1:
+        print("No labeled samples found. Skipping label propagation.")
+        return
+
+    # If you also want to ensure there's more than one labeled class:
+    labeled_classes = np.unique(labels_list[labeled_mask])
+    if len(labeled_classes) < 1:
+        print("No labeled classes found. Skipping label propagation.")
+        return
+
     n = len(states_list)
     if n > MAX_LABELPROP_SAMPLES:
         idxs = np.random.choice(n, MAX_LABELPROP_SAMPLES, replace=False)
@@ -292,7 +309,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                update_target_estimator_every=10000, discount_factor=0.99,
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
                num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None):
-    from collections import namedtuple
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -347,14 +363,17 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
+        # *** Call the modified function that checks for no-labeled-data. ***
         fit_labelprop_subsample(lp_model, state_list, label_list)
-        pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        certainty_index = np.argsort(pred_entropies)
-        certainty_index = [i for i in certainty_index if i not in labeled_index]
-        certainty_index = certainty_index[:num_LabelPropagation]
-        for index in certainty_index:
-            pseudo_label = lp_model.transduction_[index]
-            env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
+        pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T) if hasattr(lp_model, 'label_distributions_') else []
+        if len(pred_entropies) > 0:
+            certainty_index = np.argsort(pred_entropies)
+            certainty_index = [i for i in certainty_index if i not in labeled_index]
+            certainty_index = certainty_index[:num_LabelPropagation]
+            for index in certainty_index:
+                pseudo_label = lp_model.transduction_[index]
+                env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
+
         if len(replay_memory) >= replay_memory_init_size:
             break
 
@@ -403,16 +422,19 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 if len(replay_memory) == replay_memory_size:
                     replay_memory.pop(0)
                 replay_memory.append(Transition(state, reward, next_state, done))
+
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
         fit_labelprop_subsample(lp_model, state_list, label_list)
-        pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
-        certainty_index = np.argsort(pred_entropies)
-        certainty_index = [i for i in certainty_index if i in unlabeled_indices]
-        certainty_index = certainty_index[:num_LabelPropagation]
-        for index in certainty_index:
-            pseudo_label = lp_model.transduction_[index]
-            env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
+        if hasattr(lp_model, 'label_distributions_'):
+            pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
+            certainty_index = np.argsort(pred_entropies)
+            certainty_index = [i for i in certainty_index if i in unlabeled_indices]
+            certainty_index = certainty_index[:num_LabelPropagation]
+            for index in certainty_index:
+                pseudo_label = lp_model.transduction_[index]
+                env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
+
         per_loop_time2 = time.time()
         for i_epoch in range(num_epoches):
             if qlearn_estimator.summary_writer:
@@ -481,6 +503,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             if done:
                 break
             state = next_state[action]
+        from sklearn.metrics import precision_recall_fscore_support
         precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
         precision_all.append(precision)
         recall_all.append(recall)
@@ -522,7 +545,7 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.close()
 
 def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
-    test = 0  # training mode
+    test = 0
     train_data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(train_data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
@@ -582,7 +605,7 @@ def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
         return final_metric
 
 if __name__ == '__main__':
-    # Instead of 0.0005 and 0.001, we use 0.01 (1%) and 0.05 (5%)
+    # Example: 1% and 5% labeled data
     print("Running KPI experiment with 1% labeled data...")
     final_metric_1p = train_wrapper_kpi(100, 30, 0.92, 0.01)
     print("Final metric for 1% labeled data:", final_metric_1p)
