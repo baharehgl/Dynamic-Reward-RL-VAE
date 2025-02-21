@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment. Make sure env1.py only reads CSV and doesn't require PyTables.
+# Import the environment. Make sure env1.py only reads CSV, not HDF.
 from env1 import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
@@ -355,24 +355,23 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-                # Mark label
-                env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
+                # Use .loc to avoid SettingWithCopyWarning
+                env.timeseries.loc[env.timeseries_curser, 'label'] = env.timeseries.loc[env.timeseries_curser, 'anomaly']
                 num_label += 1
                 labeled_index.append(sample)
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
-        # -------- Subsample approach to label propagation -----------
+        # Subsample approach to label propagation
         fit_labelprop_subsample(lp_model, state_list, label_list)
-        # ------------------------------------------------------------
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
         certainty_index = [i for i in certainty_index if i not in labeled_index]
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
-            env.timeseries['label'][index + n_steps] = pseudo_label
+            env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
         if len(replay_memory) >= replay_memory_init_size:
             break
 
@@ -407,8 +406,10 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
         label_list = np.array(label_list)
         for new_sample in al_samples:
-            label_list[new_sample] = env.timeseries['anomaly'][new_sample + n_steps]
-            env.timeseries['label'][new_sample + n_steps] = env.timeseries['anomaly'][new_sample + n_steps]
+            # Update label_list array
+            label_list[new_sample] = env.timeseries.loc[new_sample + n_steps, 'anomaly']
+            # Update environment's DataFrame using .loc
+            env.timeseries.loc[new_sample + n_steps, 'label'] = env.timeseries.loc[new_sample + n_steps, 'anomaly']
         for sample in labeled_index:
             if sample < len(env.states_list):
                 env.timeseries_curser = sample + n_steps
@@ -423,16 +424,14 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.append(Transition(state, reward, next_state, done))
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
         label_list = np.array(label_list)
-        # -------- Subsample approach to label propagation -----------
         fit_labelprop_subsample(lp_model, state_list, label_list)
-        # ------------------------------------------------------------
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
         certainty_index = [i for i in certainty_index if i in unlabeled_indices]
         certainty_index = certainty_index[:num_LabelPropagation]
         for index in certainty_index:
             pseudo_label = lp_model.transduction_[index]
-            env.timeseries['label'][index + n_steps] = pseudo_label
+            env.timeseries.loc[index + n_steps, 'label'] = pseudo_label
         per_loop_time2 = time.time()
         for i_epoch in range(num_epoches):
             if qlearn_estimator.summary_writer:
@@ -490,7 +489,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             action_probs = policy(state, 0)
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
             predictions.append(action)
-            # Retrieve ground truth from the environment.
             current_index = env.timeseries_curser
             if hasattr(env.timeseries['anomaly'], 'iloc'):
                 ground_truth = env.timeseries['anomaly'].iloc[current_index]
@@ -547,11 +545,11 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
 def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
     test = 0  # training mode
     # Load VAE training data from KPI_data/train (expects phase2_train.csv).
-    # This part remains the same as before, just ensures we have a trained VAE.
     train_data_directory = os.path.join(current_dir, "KPI_data", "train")
     x_train = load_normal_data(train_data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=2, batch_size=32)  # set epochs=2 for demonstration; use more in real training
+    # For demonstration, let's do fewer epochs. Adjust as needed.
+    vae.fit(x_train, epochs=2, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [labeled_percentage]
     # Set dataset directories for training and testing.
@@ -559,21 +557,26 @@ def train_wrapper_kpi(num_LP, num_AL, discount_factor, labeled_percentage):
     test_dataset_dir = os.path.join(current_dir, "KPI_data", "test")
     for j in range(len(percentage)):
         exp_relative_dir = ['KPI_LP_{}_AL_{}_d{}'.format(num_LP, num_AL, discount_factor)]
-        # Create training environment (ensure EnvTimeSeriesfromRepo is adapted for CSV).
+        # Create training environment
         env = EnvTimeSeriesfromRepo(train_dataset_dir)
         env.statefnc = RNNBinaryStateFuc
         env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0)
         env.timeseries_curser_init = n_steps
         env.datasetfix = DATAFIXED
         env.datasetidx = 0
-        # Create test environment using CSV in KPI_data/test (converted from HDF).
+
+        # Create test environment
         env_test = EnvTimeSeriesfromRepo(test_dataset_dir)
         env_test.statefnc = RNNBinaryStateFuc
         env_test.rewardfnc = RNNBinaryRewardFucTest
+
         if test == 1:
             env.datasetrng = env.datasetsize
         else:
-            env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
+            # Force datasetrng to be at least 1
+            calc_rng = int(env.datasetsize * float(percentage[j]))
+            env.datasetrng = max(1, calc_rng)
+
         experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[0]))
         tf.compat.v1.reset_default_graph()
         vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
