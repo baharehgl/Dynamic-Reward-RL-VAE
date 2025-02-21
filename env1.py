@@ -36,18 +36,17 @@ def defaultRewardFuc(timeseries, timeseries_curser, action):
 class EnvTimeSeriesfromRepo():
     def __init__(self, repodir='environment/time_series_repo/'):
         """
-        This environment now ONLY looks for .csv files in repodir.
-        It does NOT read any .hdf files, so PyTables is unnecessary.
+        This environment only looks for .csv files in repodir.
+        It does NOT read .hdf, so PyTables is unnecessary.
         """
         self.repodir = repodir
         self.repodirext = []
 
-        # Walk through the directory, gather ONLY .csv files, skip __MACOSX and hidden files.
+        # Gather only .csv files, skip __MACOSX and hidden files.
         for subdir, dirs, files in os.walk(self.repodir):
             if '__MACOSX' in subdir:
                 continue
             for file in files:
-                # skip hidden files that start with ._
                 if file.endswith('.csv') and not file.startswith('._'):
                     self.repodirext.append(os.path.join(subdir, file))
 
@@ -67,46 +66,52 @@ class EnvTimeSeriesfromRepo():
         self.timeseries_repo = []
         self.states_list = []
 
-        # Process each CSV file and store it in timeseries_repo
+        # Process each CSV file.
         for path in self.repodirext:
             try:
-                # Attempt to read columns [1, 2] as 'value' and 'anomaly'
-                # Adjust if your CSV has a different column layout.
-                ts = pd.read_csv(
-                    path,
-                    usecols=[1, 2],
-                    header=0,
-                    names=['value', 'anomaly'],
-                    encoding='latin1'
-                )
+                # Read the entire CSV so we can see all columns.
+                df = pd.read_csv(path, encoding='latin1')
 
-                # Convert 'value' to numeric, drop rows with NaN
-                ts['value'] = pd.to_numeric(ts['value'], errors='coerce')
-                ts.dropna(subset=['value'], inplace=True)
-                ts['value'] = ts['value'].astype(np.float32)
+                # If your CSV has columns: [timestamp, value, label, KPI ID],
+                # rename "label" -> "anomaly" if present.
+                if 'label' in df.columns and 'anomaly' not in df.columns:
+                    df.rename(columns={'label': 'anomaly'}, inplace=True)
 
-                # If there's no 'anomaly' column or it's empty, set it to 0
-                if 'anomaly' not in ts.columns:
-                    ts['anomaly'] = 0
-                else:
-                    # Convert 'anomaly' to numeric in case it's not
-                    ts['anomaly'] = pd.to_numeric(ts['anomaly'], errors='coerce').fillna(0).astype(np.int32)
+                # If 'anomaly' still doesn't exist, create it as 0.
+                if 'anomaly' not in df.columns:
+                    df['anomaly'] = 0
 
-                # Optionally add a label column for RL usage
-                ts['label'] = -1
+                # Check that there's a 'value' column
+                if 'value' not in df.columns:
+                    # If not, assume second column is 'value'
+                    cols = list(df.columns)
+                    if len(cols) >= 2:
+                        df.rename(columns={cols[1]: 'value'}, inplace=True)
+                    else:
+                        raise ValueError(f"File {path} does not contain a 'value' column or enough columns.")
 
-                # Scale the 'value' column to [0,1] using MinMaxScaler.
-                if ts.shape[0] == 0:
+                # If your code also needs a 'label' column for some reason, you can create it
+                # but typically we only need 'anomaly' for RL logic. Let's just ensure 'label' exists:
+                if 'label' not in df.columns:
+                    # If you do want a 'label' column separate from 'anomaly', create it:
+                    df['label'] = df['anomaly']  # or -1, depending on your usage.
+
+                # Convert columns to numeric as needed
+                df['value'] = pd.to_numeric(df['value'], errors='coerce')
+                df['anomaly'] = pd.to_numeric(df['anomaly'], errors='coerce').fillna(0).astype(np.int32)
+                df.dropna(subset=['value'], inplace=True)
+                df['value'] = df['value'].astype(np.float32)
+
+                # Scale the 'value' column to [0,1]
+                if df[['value']].shape[0] == 0:
                     print(f"Warning: file {path} has no valid data; skipping.")
                     continue
                 scaler = sklearn.preprocessing.MinMaxScaler()
-                ts['value'] = scaler.fit_transform(ts[['value']])
+                df['value'] = scaler.fit_transform(df[['value']])
 
-                self.timeseries_repo.append(ts)
-
+                self.timeseries_repo.append(df)
             except Exception as e:
                 print(f"Error reading file: {path}\n{e}")
-                # skip this file
                 continue
 
         if len(self.timeseries_repo) == 0:
@@ -114,7 +119,6 @@ class EnvTimeSeriesfromRepo():
 
         self.datasetsize = len(self.timeseries_repo)
         self.datasetfix = 0
-        # Start on a random file
         self.datasetidx = random.randint(0, self.datasetsize - 1)
         self.datasetrng = self.datasetsize
 
@@ -147,26 +151,35 @@ class EnvTimeSeriesfromRepo():
 
     def reset_getall(self):
         """
-        Load the entire dataset with columns [0,1,2], typically [timestamp, value, anomaly].
-        If your CSV doesn't have these columns, adjust accordingly.
+        If you need the entire dataset with columns [0,1,2], typically [timestamp, value, anomaly].
+        Adjust if your CSV doesn't have these exact columns.
         """
         if self.datasetfix == 0:
             self.datasetidx = (self.datasetidx + 1) % self.datasetrng
 
         path = self.repodirext[self.datasetidx]
-        ts = pd.read_csv(
-            path,
-            usecols=[0, 1, 2],
-            header=0,
-            names=['timestamp', 'value', 'anomaly'],
-            encoding='latin1'
-        )
-        ts = ts.astype(np.float32)
+        df = pd.read_csv(path, encoding='latin1')
+
+        # rename label->anomaly if needed
+        if 'label' in df.columns and 'anomaly' not in df.columns:
+            df.rename(columns={'label': 'anomaly'}, inplace=True)
+
+        if 'anomaly' not in df.columns:
+            df['anomaly'] = 0
+
+        if 'value' not in df.columns:
+            cols = list(df.columns)
+            if len(cols) >= 2:
+                df.rename(columns={cols[1]: 'value'}, inplace=True)
+            else:
+                raise ValueError(f"File {path} does not contain enough columns for 'value' and 'anomaly'")
+
+        df = df.astype({'value': 'float32', 'anomaly': 'int32'})
         self.timeseries_curser = self.timeseries_curser_init
 
         scaler = sklearn.preprocessing.MinMaxScaler()
-        ts['value'] = scaler.fit_transform(ts[['value']])
-        self.timeseries = ts
+        df['value'] = scaler.fit_transform(df[['value']])
+        self.timeseries = df
         return self.timeseries
 
     def step(self, action):
