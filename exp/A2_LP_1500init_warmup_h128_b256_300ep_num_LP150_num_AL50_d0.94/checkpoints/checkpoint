@@ -1,0 +1,2 @@
+model_checkpoint_path: "C:\\Users\\robotics\\Documents\\GitHub\\Adaptive-Reward-Scaling-Reinforcement-Learning\\exp\\A2_LP_1500init_warmup_h128_b256_300ep_num_LP150_num_AL50_d0.94\\checkpoints\\model"
+all_model_checkpoint_paths: "C:\\Users\\robotics\\Documents\\GitHub\\Adaptive-Reward-Scaling-Reinforcement-Learning\\exp\\A2_LP_1500init_warmup_h128_b256_300ep_num_LP150_num_AL50_d0.94\\checkpoints\\model"
