@@ -596,6 +596,6 @@ def train_wrapper(num_LP, num_AL, discount_factor):
             return final_metric
 
 
-train_wrapper(100, 30, 0.92)
-train_wrapper(150, 50, 0.94)
-train_wrapper(200, 100, 0.96)
+train_wrapper(100, 1000, 0.92)
+train_wrapper(150, 5000, 0.94)
+train_wrapper(200, 10000, 0.96)
