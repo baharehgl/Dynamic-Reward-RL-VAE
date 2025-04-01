@@ -515,7 +515,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
     return avg_f1
 
 def save_plots(experiment_dir, episode_rewards, coef_history):
-    plot_dir = os.path.join(experiment_dir, "plots")
+    plot_dir = os.path.join(experiment_dir, "SMD-plots")
     if not os.path.exists(plot_dir):
         os.makedirs(plot_dir)
     plt.figure()
