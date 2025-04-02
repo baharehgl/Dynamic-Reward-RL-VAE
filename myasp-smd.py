@@ -60,15 +60,13 @@ def load_normal_data(data_path, n_steps):
     """
     Loads normal data from the SMD train folder.
     Assumes that each file is a .txt file with comma-separated values.
-    For each file, we select the first column as the "value" (mimicking your Yahoo-A1 format).
-    Sliding windows of length n_steps are then created.
+    For each file, the first column is selected as the "value" (to mimic Yahoo-A1).
+    Sliding windows of length n_steps are then created and normalized.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
     windows = []
     for file in all_files:
-        # Read file with comma as delimiter
         df = pd.read_csv(file, sep=",", header=None)
-        # Assume that the first column holds the value (univariate signal)
         if df.shape[1] < 1:
             continue
         df.columns = ['value'] + ['sensor_' + str(i) for i in range(1, df.shape[1])]
@@ -113,7 +111,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-original_dim = n_steps  # univariate: window length equals original_dim
+original_dim = n_steps  # for univariate signal, original_dim equals n_steps
 latent_dim = 10
 intermediate_dim = 64
 
@@ -523,8 +521,27 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.savefig(os.path.join(plot_dir, "dynamic_coef_curve.png"))
     plt.close()
 
+def convert_txt_to_csv(directory):
+    """
+    Checks the given directory for CSV files. If none are found,
+    converts all .txt files in the directory to .csv files.
+    """
+    files = os.listdir(directory)
+    csv_files = [f for f in files if f.endswith('.csv')]
+    if len(csv_files) == 0:
+        for f in files:
+            if f.endswith('.txt'):
+                txt_path = os.path.join(directory, f)
+                csv_path = os.path.join(directory, f.replace('.txt', '.csv'))
+                try:
+                    df = pd.read_csv(txt_path, sep=",", header=None)
+                    df.to_csv(csv_path, index=False)
+                    print("Converted {} to CSV.".format(f))
+                except Exception as e:
+                    print("Error converting {}: {}".format(f, e))
+
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Change the data directory to SMD (normal data in train folder).
+    # Use the SMD train folder for VAE training.
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
@@ -535,8 +552,11 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     for j in range(len(percentage)):
         exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) +
                             '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        # Change dataset directory to SMD test folder.
+        # For RL environment, use the SMD test folder.
         dataset_dir = [os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")]
+        # Ensure that CSV files exist in the test directory (convert if needed)
+        for d in dataset_dir:
+            convert_txt_to_csv(d)
         for i in range(len(dataset_dir)):
             env = EnvTimeSeriesfromRepo(dataset_dir[i])
             env.statefnc = RNNBinaryStateFuc
