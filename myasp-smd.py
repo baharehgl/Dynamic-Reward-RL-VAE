@@ -50,7 +50,7 @@ action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
 n_steps = 25  # sliding window length
-n_input_dim = 2  # dimension of input to LSTM (for univariate: value and action indicator)
+n_input_dim = 2  # dimension of input to LSTM (value and action indicator)
 n_hidden_dim = 128  # hidden dimension
 
 validation_separate_ratio = 0.9
@@ -58,18 +58,17 @@ validation_separate_ratio = 0.9
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
     """
-    Modified to load SMD normal data.
-    For each file (now assumed to be .txt) in the SMD train folder, we read the file
-    (using whitespace as delimiter) and then select the first column as the "value".
-    We then extract sliding windows of length n_steps.
+    Loads normal data from the SMD train folder.
+    Assumes that each file is a .txt file with comma-separated values.
+    For each file, we select the first column as the "value" (mimicking your Yahoo-A1 format).
+    Sliding windows of length n_steps are then created.
     """
-    # SMD files are .txt; adjust file extension check
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
     windows = []
     for file in all_files:
-        # Read the file with no header and assume whitespace separation
-        df = pd.read_csv(file, sep=r'\s+', header=None)
-        # For simplicity, choose the first column as "value"
+        # Read file with comma as delimiter
+        df = pd.read_csv(file, sep=",", header=None)
+        # Assume that the first column holds the value (univariate signal)
         if df.shape[1] < 1:
             continue
         df.columns = ['value'] + ['sensor_' + str(i) for i in range(1, df.shape[1])]
@@ -114,7 +113,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-original_dim = n_steps  # for univariate, window length equals original_dim
+original_dim = n_steps  # univariate: window length equals original_dim
 latent_dim = 10
 intermediate_dim = 64
 
@@ -123,11 +122,6 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 #####################################################
 # State and Reward Functions.
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
-    """
-    Constructs the state by taking a sliding window from the timeseries DataFrame.
-    The timeseries DataFrame here is expected to have a column 'value'.
-    An extra binary feature is appended to indicate the candidate action.
-    """
     if timeseries_curser == n_steps:
         state = []
         for i in range(timeseries_curser):
@@ -144,10 +138,6 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
     return None
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
-    """
-    Computes reward based on the VAE reconstruction error.
-    The current window (flattened) is compared against the VAE reconstruction.
-    """
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
         vae_reconstruction = vae.predict(current_state)
@@ -242,7 +232,7 @@ def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward
     new_coef = current_coef + alpha * (target_reward - episode_reward)
     return max(min(new_coef, max_coef), min_coef)
 
-# --- Active Learning remains unchanged.
+# --- Active Learning class remains unchanged.
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
@@ -534,8 +524,7 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.close()
 
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Change the data directory to SMD.
-    # For VAE training, use the SMD train folder.
+    # Change the data directory to SMD (normal data in train folder).
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
@@ -546,7 +535,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     for j in range(len(percentage)):
         exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) +
                             '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        # Change dataset directory to the SMD test folder.
+        # Change dataset directory to SMD test folder.
         dataset_dir = [os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")]
         for i in range(len(dataset_dir)):
             env = EnvTimeSeriesfromRepo(dataset_dir[i])
@@ -595,6 +584,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
             save_plots(experiment_dir, episode_rewards, coef_history)
             return final_metric
 
+# Uncomment one of the following calls to run training with different hyperparameters.
 #train_wrapper(100, 1000, 0.92)
 #train_wrapper(150, 5000, 0.94)
 #train_wrapper(200, 10000, 0.96)
