@@ -32,15 +32,15 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
-DATAFIXED = 0  # whether target is fixed to a single time series
-EPISODES = 300  # number of episodes (for demonstration)
-DISCOUNT_FACTOR = 0.5  # reward discount factor
-EPSILON = 0.5  # epsilon-greedy parameter
-EPSILON_DECAY = 1.00  # epsilon decay
+DATAFIXED = 0            # whether target is fixed to a single time series
+EPISODES = 300           # number of episodes (for demonstration)
+DISCOUNT_FACTOR = 0.5     # reward discount factor
+EPSILON = 0.5            # epsilon-greedy parameter
+EPSILON_DECAY = 1.00     # epsilon decay
 
 # Extrinsic reward values (heuristic):
-TN_Value = 1  # True Negative
-TP_Value = 5  # True Positive
+TN_Value = 1   # True Negative
+TP_Value = 5   # True Positive
 FP_Value = -1  # False Positive
 FN_Value = -5  # False Negative
 
@@ -49,9 +49,9 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # sliding window length
-n_input_dim = 2  # dimension of input to LSTM (value and action indicator)
-n_hidden_dim = 128  # hidden dimension
+n_steps = 25             # sliding window length
+n_input_dim = 2          # dimension of input to LSTM (value and action indicator)
+n_hidden_dim = 128       # hidden dimension
 
 validation_separate_ratio = 0.9
 
@@ -59,9 +59,9 @@ validation_separate_ratio = 0.9
 def load_normal_data(data_path, n_steps):
     """
     Loads normal data from the SMD train folder.
-    Assumes that each file is a .txt file with comma-separated values.
-    For each file, the first column is selected as the "value" (to mimic Yahoo-A1).
-    Sliding windows of length n_steps are then created and normalized.
+    Assumes each file is a .txt file with comma-separated values.
+    For each file, the first column is used as the "value" (to mimic Yahoo-A1).
+    Creates sliding windows of length n_steps and normalizes them.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
     windows = []
@@ -315,13 +315,17 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     policy = make_epsilon_greedy_policy(qlearn_estimator, env.action_space_n, sess)
     num_label = 0
     print('Warm up starting...')
-    outliers_fraction = 0.01
+    # Limit warm-up samples to avoid processing entire dataset.
+    max_warmup_samples = 10000
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
         data_train.extend(env.states_list)
-    model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
+        if len(data_train) >= max_warmup_samples:
+            data_train = data_train[:max_warmup_samples]
+            break
+    model_warm = WarmUp().warm_up_isolation_forest(0.01, data_train)
     lp_model = LabelSpreading()
     for t in itertools.count():
         env.reset()
@@ -346,7 +350,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
-        # Cast label_list to int to avoid continuous label type error
         label_list = np.array(label_list, dtype=int)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
@@ -605,6 +608,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
             save_plots(experiment_dir, episode_rewards, coef_history)
             return final_metric
 
+# Uncomment one of the following calls to run training with different hyperparameters.
 #train_wrapper(100, 1000, 0.92)
 #train_wrapper(150, 5000, 0.94)
 #train_wrapper(200, 10000, 0.96)
