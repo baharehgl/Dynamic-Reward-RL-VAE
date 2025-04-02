@@ -346,7 +346,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 next_state, reward, done, _ = env.step(action)
                 replay_memory.append(Transition(state, reward, next_state, done))
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
-        label_list = np.array(label_list)
+        # Cast label_list to int to avoid continuous label type error
+        label_list = np.array(label_list, dtype=int)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
@@ -387,7 +388,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         num_label += len(al_samples)
         state_list = np.array(env.states_list).transpose(2, 0, 1)[0]
         label_list = [env.timeseries['label'][i] for i in range(n_steps, len(env.timeseries['label']))]
-        label_list = np.array(label_list)
+        label_list = np.array(label_list, dtype=int)
         for new_sample in al_samples:
             label_list[new_sample] = env.timeseries['anomaly'][new_sample + n_steps]
             env.timeseries['label'][new_sample + n_steps] = env.timeseries['anomaly'][new_sample + n_steps]
@@ -404,7 +405,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                     replay_memory.pop(0)
                 replay_memory.append(Transition(state, reward, next_state, done))
         unlabeled_indices = [i for i, e in enumerate(label_list) if e == -1]
-        label_list = np.array(label_list)
+        label_list = np.array(label_list, dtype=int)
         lp_model.fit(state_list, label_list)
         pred_entropies = stats.distributions.entropy(lp_model.label_distributions_.T)
         certainty_index = np.argsort(pred_entropies)
@@ -604,7 +605,6 @@ def train_wrapper(num_LP, num_AL, discount_factor):
             save_plots(experiment_dir, episode_rewards, coef_history)
             return final_metric
 
-# Uncomment one of the following calls to run training with different hyperparameters.
 #train_wrapper(100, 1000, 0.92)
 #train_wrapper(150, 5000, 0.94)
 #train_wrapper(200, 10000, 0.96)
