@@ -561,7 +561,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=2, batch_size=32)
+    vae.fit(x_train, epochs=200, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
@@ -600,7 +600,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 
             with sess.as_default():
                 episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                           num_episodes=5, num_epoches=10,
+                                                           num_episodes=300, num_epoches=10,
                                                            experiment_dir=experiment_dir,
                                                            replay_memory_size=500000,
                                                            replay_memory_init_size=1500,
