@@ -27,20 +27,21 @@ sys.path.append(current_dir)
 from env import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
+from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
-DATAFIXED = 0            # whether target is fixed to a single time series
-EPISODES = 300           # number of episodes (for demonstration)
-DISCOUNT_FACTOR = 0.5     # reward discount factor
-EPSILON = 0.5            # epsilon-greedy parameter
-EPSILON_DECAY = 1.00     # epsilon decay
+DATAFIXED = 0  # whether target is fixed to a single time series
+EPISODES = 300  # number of episodes (for demonstration)
+DISCOUNT_FACTOR = 0.5  # reward discount factor
+EPSILON = 0.5  # epsilon-greedy parameter
+EPSILON_DECAY = 1.00  # epsilon decay
 
 # Extrinsic reward values (heuristic):
-TN_Value = 1   # True Negative
-TP_Value = 5   # True Positive
+TN_Value = 1  # True Negative
+TP_Value = 5  # True Positive
 FP_Value = -1  # False Positive
 FN_Value = -5  # False Negative
 
@@ -49,9 +50,9 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25             # sliding window length
-n_input_dim = 2          # dimension of input to LSTM (value and action indicator)
-n_hidden_dim = 128       # hidden dimension
+n_steps = 25  # sliding window length
+n_input_dim = 2  # dimension of input to LSTM (value and action indicator)
+n_hidden_dim = 128  # hidden dimension
 
 validation_separate_ratio = 0.9
 
@@ -59,9 +60,9 @@ validation_separate_ratio = 0.9
 def load_normal_data(data_path, n_steps):
     """
     Loads normal data from the SMD train folder.
-    Assumes each file is a .txt file with comma-separated values.
-    For each file, the first column is used as the "value" (to mimic Yahoo-A1).
-    Creates sliding windows of length n_steps and normalizes them.
+    Assumes that each file is a .txt file with comma-separated values.
+    For each file, the first column is selected as the "value" (to mimic Yahoo-A1).
+    Sliding windows of length n_steps are then created and normalized.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
     windows = []
@@ -315,7 +316,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     policy = make_epsilon_greedy_policy(qlearn_estimator, env.action_space_n, sess)
     num_label = 0
     print('Warm up starting...')
-    # Limit warm-up samples to avoid processing entire dataset.
+    outliers_fraction = 0.01
     max_warmup_samples = 10000
     data_train = []
     for num in range(env.datasetsize):
@@ -325,7 +326,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         if len(data_train) >= max_warmup_samples:
             data_train = data_train[:max_warmup_samples]
             break
-    model_warm = WarmUp().warm_up_isolation_forest(0.01, data_train)
+    model_warm = WarmUp().warm_up_isolation_forest(outliers_fraction, data_train)
     lp_model = LabelSpreading()
     for t in itertools.count():
         env.reset()
@@ -454,9 +455,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     return episode_rewards, coef_history
 
 def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
-    from sklearn.metrics import precision_recall_fscore_support
     rec_file = open(record_dir + 'performance.txt', 'w')
-    precision_all, recall_all, f1_all = [], [], []
+    precision_all, recall_all, f1_all, aupr_all = [], [], [], []
     for i_episode in range(num_episodes):
         print("Episode {}/{}".format(i_episode + 1, num_episodes))
         policy = make_epsilon_greedy_policy(estimator, env.action_space_n, tf.compat.v1.get_default_session())
@@ -485,26 +485,38 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             if done:
                 break
             state = next_state[action]
+        # Convert to binary integer labels.
+        predictions = np.array(predictions).round().astype(int)
+        ground_truths = np.array(ground_truths).round().astype(int)
         precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
+        try:
+            aupr = average_precision_score(ground_truths, predictions)
+        except Exception as e:
+            aupr = 0.0
         precision_all.append(precision)
         recall_all.append(recall)
         f1_all.append(f1)
-        print("Episode {}: Precision:{}, Recall:{}, F1-score:{}".format(i_episode+1, precision, recall, f1))
-        rec_file.write("Episode {}: Precision:{}, Recall:{}, F1-score:{}\n".format(i_episode+1, precision, recall, f1))
+        aupr_all.append(aupr)
+        print("Episode {}: Precision:{}, Recall:{}, F1-score:{}, AU-PR:{}".format(i_episode+1, precision, recall, f1, aupr))
+        rec_file.write("Episode {}: Precision:{}, Recall:{}, F1-score:{}, AU-PR:{}\n".format(i_episode+1, precision, recall, f1, aupr))
         if plot:
-            f, axarr = plt.subplots(3, sharex=True)
+            f, axarr = plt.subplots(4, sharex=True)
             axarr[0].plot(ts_values)
             axarr[0].set_title('Time Series')
             axarr[1].plot(predictions, color='g')
             axarr[1].set_title('Predictions')
             axarr[2].plot(ground_truths, color='r')
             axarr[2].set_title('Ground Truth')
+            axarr[3].plot([aupr]*len(ts_values), color='m')
+            axarr[3].set_title('AU-PR')
             plt.savefig(os.path.join(record_dir, "validation_episode_{}.png".format(i_episode)))
             plt.close(f)
     rec_file.close()
     avg_f1 = np.mean(f1_all)
+    avg_aupr = np.mean(aupr_all)
     print("Average F1-score over {} episodes: {}".format(num_episodes, avg_f1))
-    return avg_f1
+    print("Average AU-PR over {} episodes: {}".format(num_episodes, avg_aupr))
+    return avg_f1, avg_aupr
 
 def save_plots(experiment_dir, episode_rewards, coef_history):
     plot_dir = os.path.join(experiment_dir, "SMD-plots")
@@ -588,7 +600,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 
             with sess.as_default():
                 episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                           num_episodes=300, num_epoches=10,
+                                                           num_episodes=5, num_epoches=10,
                                                            experiment_dir=experiment_dir,
                                                            replay_memory_size=500000,
                                                            replay_memory_init_size=1500,
@@ -602,11 +614,11 @@ def train_wrapper(num_LP, num_AL, discount_factor):
                                                            num_active_learning=num_AL,
                                                            test=test,
                                                            vae_model=vae)
-                final_metric = q_learning_validator(env_test, qlearn_estimator,
+                final_metric, final_aupr = q_learning_validator(env_test, qlearn_estimator,
                                                     int(env.datasetsize * (1 - validation_separate_ratio)),
                                                     experiment_dir)
             save_plots(experiment_dir, episode_rewards, coef_history)
-            return final_metric
+            return final_metric, final_aupr
 
 # Uncomment one of the following calls to run training with different hyperparameters.
 #train_wrapper(100, 1000, 0.92)
