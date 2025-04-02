@@ -528,7 +528,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=200, batch_size=32)
+    vae.fit(x_train, epochs=2, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
