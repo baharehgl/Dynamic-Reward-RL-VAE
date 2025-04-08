@@ -29,18 +29,18 @@ from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 
-# Set GPU devices if available.
+# Set GPU devices.
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
 DATAFIXED = 0               # whether target is fixed to a single time series
-EPISODES = 300              # number of episodes (for demonstration)
+EPISODES = 30               # number of episodes (for quick testing)
 DISCOUNT_FACTOR = 0.5       # reward discount factor
 EPSILON = 0.5               # epsilon-greedy parameter
 EPSILON_DECAY = 1.00        # epsilon decay
 
-# Extrinsic reward values (heuristic):
+# Extrinsic reward values.
 TN_Value = 1    # True Negative
 TP_Value = 5    # True Positive
 FP_Value = -1   # False Positive
@@ -53,18 +53,12 @@ action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
 n_steps = 25                # sliding window length
-n_input_dim = 2             # dimension of input to LSTM (value and action indicator)
+n_input_dim = 2             # dimension for LSTM (value and action indicator)
 n_hidden_dim = 128          # hidden dimension
 validation_separate_ratio = 0.9
 
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
-    """
-    Loads normal data from the SMD train folder.
-    Assumes that each file is a .txt file with comma-separated values.
-    For each file, the first column is selected as the "value" (to mimic Yahoo-A1).
-    Sliding windows of length n_steps are then created and normalized.
-    """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
     windows = []
     for file in all_files:
@@ -97,7 +91,6 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')(h)
     z_mean = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
     z_log_var = layers.Dense(latent_dim, kernel_initializer='he_normal')(h)
-    # Clip log variance for numerical stability.
     z_log_var = tf.clip_by_value(z_log_var, -10.0, 10.0)
     z = Sampling()([z_mean, z_log_var])
     decoder_h = layers.Dense(intermediate_dim, activation='relu', kernel_initializer='he_normal')
@@ -138,18 +131,19 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
     return None
 
-# New reward function option with flag to include VAE penalty.
+# Introduce a VAE scaling factor to amplify the penalty.
+vae_scale = 10.0
+
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0, include_vae_penalty=True):
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
         vae_penalty = 0.0
         if include_vae_penalty and vae is not None:
-            # Compute reconstruction error from VAE.
             vae_reconstruction = vae.predict(current_state)
             reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-            vae_penalty = dynamic_coef * reconstruction_error
-            # Log reconstruction error for diagnostics.
-            print("Reconstruction error: {:.5f}, VAE penalty: {:.5f}".format(reconstruction_error, vae_penalty))
+            # Scale the reconstruction error.
+            vae_penalty = dynamic_coef * vae_scale * reconstruction_error
+            print("Reconstruction error: {:.5f}, scaled VAE penalty: {:.5f}".format(reconstruction_error, vae_penalty))
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
         elif timeseries['label'][timeseries_curser] == 1:
@@ -159,7 +153,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
     else:
         return [0, 0]
 
-# Testing reward function (without penalty).
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
@@ -179,7 +172,6 @@ class Q_Estimator_Nonlinear():
                                                   dtype=tf.float32, name="state")
             self.target = tf.compat.v1.placeholder(shape=[None, action_space_n],
                                                    dtype=tf.float32, name="target")
-            # Simple fully connected output from LSTM.
             self.weights = {'out': tf.Variable(tf.compat.v1.random_normal([n_hidden_dim, action_space_n]))}
             self.biases = {'out': tf.Variable(tf.compat.v1.random_normal([action_space_n]))}
             self.state_unstack = tf.compat.v1.unstack(self.state, n_steps, 1)
@@ -189,7 +181,6 @@ class Q_Estimator_Nonlinear():
             self.losses = tf.compat.v1.squared_difference(self.action_values, self.target)
             self.loss = tf.reduce_mean(self.losses)
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
-            # Global step variable for learning rate scheduling and tracking.
             global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0]
             self.train_op = self.optimizer.minimize(self.loss, global_step=global_step_var)
             self.summaries = tf.compat.v1.summary.merge([
@@ -236,7 +227,6 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
         return A
     return policy_fn
 
-# Proportional update for dynamic coefficient.
 def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward=100.0, alpha=0.001, min_coef=0.1, max_coef=10.0):
     new_coef = current_coef + alpha * (target_reward - episode_reward)
     new_coef = max(min(new_coef, max_coef), min_coef)
@@ -376,23 +366,22 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         if len(replay_memory) >= replay_memory_init_size:
             break
 
-    dynamic_coef = 10.0  # initial dynamic coefficient
+    # Initialize with a higher dynamic coefficient.
+    dynamic_coef = 20.0
     episode_rewards = []
     coef_history = []
 
     for i_episode in range(num_episodes):
-        # Use the new reward function with adjustable VAE penalty flag.
         env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae_model, dynamic_coef=dynamic_coef, include_vae_penalty=include_vae_penalty)
         episode_reward = 0.0
 
-        if i_episode % 50 == 49:
+        if i_episode % 10 == 9:
             print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
             saver.save(sess, checkpoint_path)
 
         per_loop_time1 = time.time()
         state = env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
-        # Ensure testing environment is proper.
         while env.datasetidx > env.datasetrng * validation_separate_ratio:
             state = env.reset()
             env.states_list = [s for s in env.states_list if s is not None]
@@ -411,7 +400,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         for new_sample in al_samples:
             label_list[new_sample] = env.timeseries['anomaly'][new_sample + n_steps]
             env.timeseries['label'][new_sample + n_steps] = env.timeseries['anomaly'][new_sample + n_steps]
-        # Process each labeled sample.
         for sample in labeled_index:
             if sample < len(env.states_list):
                 env.timeseries_curser = sample + n_steps
@@ -436,7 +424,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
             env.timeseries['label'][index + n_steps] = pseudo_label
         per_loop_time2 = time.time()
 
-        # Update the Q-network.
         for i_epoch in range(num_epoches):
             if qlearn_estimator.summary_writer:
                 episode_summary = tf.compat.v1.Summary()
@@ -503,7 +490,6 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             if done:
                 break
             state = next_state[action]
-        # Convert to binary integer labels.
         predictions = np.array(predictions).round().astype(int)
         ground_truths = np.array(ground_truths).round().astype(int)
         precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
@@ -556,10 +542,6 @@ def save_plots(experiment_dir, episode_rewards, coef_history):
     plt.close()
 
 def convert_txt_to_csv(directory):
-    """
-    Checks the given directory for CSV files. If none are found,
-    converts all .txt files in the directory to .csv files.
-    """
     files = os.listdir(directory)
     csv_files = [f for f in files if f.endswith('.csv')]
     if len(csv_files) == 0:
@@ -575,28 +557,23 @@ def convert_txt_to_csv(directory):
                     print("Error converting {}: {}".format(f, e))
 
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Use the SMD train folder for VAE training.
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    # Increase epochs if necessary for better training.
+    # For quicker tests, use 20 epochs; for full training, you may increase this.
     vae.fit(x_train, epochs=20, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
-    # You can try different percentages for early testing.
     for j in range(len(percentage)):
-        exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_300ep_num_LP' + str(num_LP) +
+        exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_30ep_num_LP' + str(num_LP) +
                             '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        # For RL environment, use the SMD test folder.
         dataset_dir = [os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")]
-        # Ensure that CSV files exist in the test directory (convert if needed)
         for d in dataset_dir:
             convert_txt_to_csv(d)
         for i in range(len(dataset_dir)):
             env = EnvTimeSeriesfromRepo(dataset_dir[i])
             env.statefnc = RNNBinaryStateFuc
-            # Use the reward function with VAE penalty for training.
             env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0, include_vae_penalty=True)
             env.timeseries_curser_init = n_steps
             env.datasetfix = DATAFIXED
@@ -621,7 +598,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 
             with sess.as_default():
                 episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                           num_episodes=30, num_epoches=10,
+                                                           num_episodes=EPISODES, num_epoches=10,
                                                            experiment_dir=experiment_dir,
                                                            replay_memory_size=500000,
                                                            replay_memory_init_size=1500,
