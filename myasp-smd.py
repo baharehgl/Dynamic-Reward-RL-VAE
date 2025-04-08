@@ -33,15 +33,15 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
 # Macros and Hyperparameters.
-DATAFIXED = 0  # whether target is fixed to a single time series
-EPISODES = 300  # number of episodes (for demonstration)
+DATAFIXED = 0       # whether target is fixed to a single time series
+EPISODES = 300      # number of episodes (for demonstration)
 DISCOUNT_FACTOR = 0.5  # reward discount factor
-EPSILON = 0.5  # epsilon-greedy parameter
+EPSILON = 0.5       # epsilon-greedy parameter
 EPSILON_DECAY = 1.00  # epsilon decay
 
 # Extrinsic reward values (heuristic):
-TN_Value = 1  # True Negative
-TP_Value = 5  # True Positive
+TN_Value = 1   # True Negative
+TP_Value = 5   # True Positive
 FP_Value = -1  # False Positive
 FN_Value = -5  # False Negative
 
@@ -50,9 +50,9 @@ ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
 action_space_n = len(action_space)
 
-n_steps = 25  # sliding window length
-n_input_dim = 2  # dimension of input to LSTM (value and action indicator)
-n_hidden_dim = 128  # hidden dimension
+n_steps = 25         # sliding window length
+n_input_dim = 2      # dimension of input to LSTM (value and action indicator)
+n_hidden_dim = 128   # hidden dimension
 
 validation_separate_ratio = 0.9
 
@@ -61,7 +61,7 @@ def load_normal_data(data_path, n_steps):
     """
     Loads normal data from the SMD train folder.
     Assumes that each file is a .txt file with comma-separated values.
-    For each file, the first column is selected as the "value" (to mimic Yahoo-A1).
+    For each file, the first column is selected as the "value" (mimicking Yahoo-A1).
     Sliding windows of length n_steps are then created and normalized.
     """
     all_files = [os.path.join(data_path, fname) for fname in os.listdir(data_path) if fname.endswith('.txt')]
@@ -112,7 +112,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-original_dim = n_steps  # for univariate signal, original_dim equals n_steps
+original_dim = n_steps  # for univariate signal: one value per timestep
 latent_dim = 10
 intermediate_dim = 64
 
@@ -121,6 +121,7 @@ vae, encoder = build_vae(original_dim, latent_dim, intermediate_dim)
 #####################################################
 # State and Reward Functions.
 def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=None):
+    # Creates a sliding window state with an extra binary feature (0 or 1) for action candidate.
     if timeseries_curser == n_steps:
         state = []
         for i in range(timeseries_curser):
@@ -137,10 +138,12 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
     return None
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0):
+    # Computes the reward using the VAE reconstruction error
     if timeseries_curser >= n_steps:
         current_state = np.array([timeseries['value'][timeseries_curser - n_steps:timeseries_curser]])
         vae_reconstruction = vae.predict(current_state)
         reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
+        # Adjust dynamic_coef (initially set lower than before, e.g., 5.0) so that it does not dominate the reward
         vae_penalty = dynamic_coef * reconstruction_error
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
@@ -152,6 +155,7 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         return [0, 0]
 
 def RNNBinaryRewardFucTest(timeseries, timeseries_curser, action=0):
+    # Test version of the reward function using ground truth anomaly label
     if timeseries_curser >= n_steps:
         if timeseries['anomaly'][timeseries_curser] == 0:
             return [TN_Value, FP_Value]
@@ -317,7 +321,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     num_label = 0
     print('Warm up starting...')
     outliers_fraction = 0.01
-    max_warmup_samples = 10000
+    #max_warmup_samples = 10000
+    max_warmup_samples = 10
     data_train = []
     for num in range(env.datasetsize):
         env.reset()
@@ -363,7 +368,8 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         if len(replay_memory) >= replay_memory_init_size:
             break
 
-    dynamic_coef = 10.0
+    # Start with a lower initial dynamic coefficient (5.0) to reduce the influence of high reconstruction error.
+    dynamic_coef = 5.0
     episode_rewards = []
     coef_history = []
 
@@ -485,7 +491,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             if done:
                 break
             state = next_state[action]
-        # Convert to binary integer labels.
+        # Convert predictions and ground truths to binary (integers) to compute discrete metrics.
         predictions = np.array(predictions).round().astype(int)
         ground_truths = np.array(ground_truths).round().astype(int)
         precision, recall, f1, _ = precision_recall_fscore_support(ground_truths, predictions, average='binary', zero_division=0)
@@ -561,7 +567,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(data_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae.fit(x_train, epochs=200, batch_size=32)
+    vae.fit(x_train, epochs=2, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
@@ -600,7 +606,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
 
             with sess.as_default():
                 episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                           num_episodes=300, num_epoches=10,
+                                                           num_episodes=5, num_epoches=10,
                                                            experiment_dir=experiment_dir,
                                                            replay_memory_size=500000,
                                                            replay_memory_init_size=1500,
@@ -620,7 +626,6 @@ def train_wrapper(num_LP, num_AL, discount_factor):
             save_plots(experiment_dir, episode_rewards, coef_history)
             return final_metric, final_aupr
 
-# Uncomment one of the following calls to run training with different hyperparameters.
 #train_wrapper(100, 1000, 0.92)
 #train_wrapper(150, 5000, 0.94)
 #train_wrapper(200, 10000, 0.96)
