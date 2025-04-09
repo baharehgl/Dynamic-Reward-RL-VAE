@@ -23,8 +23,8 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the environment.
-from env import EnvTimeSeriesfromRepo
+# Import the updated environment (env-smd.py should contain the revised EnvTimeSeriesfromRepo)
+from env_smd import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
@@ -42,9 +42,9 @@ EPSILON_DECAY = 1.00        # epsilon decay
 
 # Extrinsic reward values.
 TN_Value = 1    # True Negative
-TP_Value = 10    # True Positive
+TP_Value = 5    # True Positive
 FP_Value = -1   # False Positive
-FN_Value = -10   # False Negative
+FN_Value = -5   # False Negative
 
 # Define action space.
 NOT_ANOMALY = 0
@@ -107,7 +107,7 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
     vae.compile(optimizer=optimizer)
     return vae, encoder
 
-original_dim = n_steps      # for univariate signal, original_dim equals n_steps
+original_dim = n_steps
 latent_dim = 10
 intermediate_dim = 64
 
@@ -131,7 +131,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
     return None
 
-# Introduce a VAE scaling factor to amplify the penalty.
+# VAE scaling factor.
 vae_scale = 10.0
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0, include_vae_penalty=True):
@@ -141,9 +141,9 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         if include_vae_penalty and vae is not None:
             vae_reconstruction = vae.predict(current_state)
             reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-            # Scale the reconstruction error.
             vae_penalty = dynamic_coef * vae_scale * reconstruction_error
             print("Reconstruction error: {:.5f}, scaled VAE penalty: {:.5f}".format(reconstruction_error, vae_penalty))
+        # Use the "label" column (updated by active learning) for training rewards.
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
         elif timeseries['label'][timeseries_curser] == 1:
@@ -233,7 +233,7 @@ def update_dynamic_coef_proportional(current_coef, episode_reward, target_reward
     print("Updating dynamic coefficient: old = {:.3f}, new = {:.3f}".format(current_coef, new_coef))
     return new_coef
 
-# --- Active Learning class.
+# --- Active Learning classes.
 class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
@@ -266,7 +266,7 @@ class active_learning(object):
 
     def label(self, active_samples):
         for sample in active_samples:
-            print('AL finds one of the most confused samples:')
+            print('Active Learning finds one of the most confused samples:')
             print(self.env.timeseries['value'].iloc[sample:sample + n_steps])
             print('Please label the last timestamp (0 for normal, 1 for anomaly):')
             label = input()
@@ -296,8 +296,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
-               num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None,
-               include_vae_penalty=True):
+               num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None, include_vae_penalty=True):
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -308,7 +307,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
     if latest_checkpoint:
         print("Loading model checkpoint {}...\n".format(latest_checkpoint))
-        saver.restore(sess, latest_checkpoint)
+        saver.restore(sess, checkpoint_path)
         if test:
             return
     global_step_list = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")
@@ -348,6 +347,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+                # Warm-up: Copy ground truth from "anomaly" to "label"
                 env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
                 num_label += 1
                 labeled_index.append(sample)
@@ -366,7 +366,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
         if len(replay_memory) >= replay_memory_init_size:
             break
 
-    # Initialize with a higher dynamic coefficient.
     dynamic_coef = 20.0
     episode_rewards = []
     coef_history = []
@@ -374,11 +373,9 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
     for i_episode in range(num_episodes):
         env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae_model, dynamic_coef=dynamic_coef, include_vae_penalty=include_vae_penalty)
         episode_reward = 0.0
-
         if i_episode % 10 == 9:
             print("Save checkpoint in episode {}/{}".format(i_episode + 1, num_episodes))
             saver.save(sess, checkpoint_path)
-
         per_loop_time1 = time.time()
         state = env.reset()
         env.states_list = [s for s in env.states_list if s is not None]
@@ -423,7 +420,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
             pseudo_label = lp_model.transduction_[index]
             env.timeseries['label'][index + n_steps] = pseudo_label
         per_loop_time2 = time.time()
-
         for i_epoch in range(num_epoches):
             if qlearn_estimator.summary_writer:
                 episode_summary = tf.compat.v1.Summary()
@@ -471,7 +467,7 @@ def q_learning_validator(env, estimator, num_episodes, record_dir=None, plot=1):
             state = env.reset()
             env.states_list = [s for s in env.states_list if s is not None]
             print('double reset')
-        print('Testing on: ' + str(env.repodirext[env.datasetidx]))
+        print('Testing on: ' + str(env.sensor_files[env.datasetidx]))
         predictions = []
         ground_truths = []
         ts_values = []
@@ -557,10 +553,11 @@ def convert_txt_to_csv(directory):
                     print("Error converting {}: {}".format(f, e))
 
 def train_wrapper(num_LP, num_AL, discount_factor):
-    data_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
-    x_train = load_normal_data(data_directory, n_steps)
+    # Use the sensor files from the SMD train folder for VAE training.
+    train_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
+    x_train = load_normal_data(train_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    # For quicker tests, use 20 epochs; for full training, you may increase this.
+    # For quicker tests, use 20 epochs; for full training, increase this.
     vae.fit(x_train, epochs=20, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
@@ -568,61 +565,61 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     for j in range(len(percentage)):
         exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_30ep_num_LP' + str(num_LP) +
                             '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        dataset_dir = [os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")]
-        for d in dataset_dir:
-            convert_txt_to_csv(d)
-        for i in range(len(dataset_dir)):
-            env = EnvTimeSeriesfromRepo(dataset_dir[i])
-            env.statefnc = RNNBinaryStateFuc
-            env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0, include_vae_penalty=True)
-            env.timeseries_curser_init = n_steps
-            env.datasetfix = DATAFIXED
-            env.datasetidx = 0
-            env_test = env
-            env_test.rewardfnc = RNNBinaryRewardFucTest
-            if test == 1:
-                env.datasetrng = env.datasetsize
-            else:
-                env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
-            experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[i]))
+        # For the RL environment, use the sensor and label folders.
+        sensor_dir = os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")
+        label_dir = os.path.join(current_dir, "SMD", "ServerMachineDataset", "test_label")
+        convert_txt_to_csv(sensor_dir)
+        env = EnvTimeSeriesfromRepo(sensor_dir=sensor_dir, label_dir=label_dir)
+        env.statefnc = RNNBinaryStateFuc
+        env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae, dynamic_coef=10.0, include_vae_penalty=True)
+        env.timeseries_curser_init = n_steps
+        env.datasetfix = DATAFIXED
+        env.datasetidx = 0
+        env_test = env
+        env_test.rewardfnc = RNNBinaryRewardFucTest
+        if test == 1:
+            env.datasetrng = env.datasetsize
+        else:
+            env.datasetrng = np.int32(env.datasetsize * float(percentage[j]))
+        experiment_dir = os.path.abspath("./exp/{}".format(exp_relative_dir[0]))
 
-            tf.compat.v1.reset_default_graph()
-            vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
-            sess = tf.compat.v1.Session()
-            from tensorflow.compat.v1.keras import backend as K
-            K.set_session(sess)
-            global_step = tf.Variable(0, name="global_step", trainable=False)
-            qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
-            target_estimator = Q_Estimator_Nonlinear(scope="target")
-            sess.run(tf.compat.v1.global_variables_initializer())
+        tf.compat.v1.reset_default_graph()
+        vae = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
+        sess = tf.compat.v1.Session()
+        from tensorflow.compat.v1.keras import backend as K
+        K.set_session(sess)
+        global_step = tf.Variable(0, name="global_step", trainable=False)
+        qlearn_estimator = Q_Estimator_Nonlinear(scope="qlearn", summaries_dir=experiment_dir, learning_rate=0.0003)
+        target_estimator = Q_Estimator_Nonlinear(scope="target")
+        sess.run(tf.compat.v1.global_variables_initializer())
 
-            with sess.as_default():
-                episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
-                                                           num_episodes=EPISODES, num_epoches=10,
-                                                           experiment_dir=experiment_dir,
-                                                           replay_memory_size=500000,
-                                                           replay_memory_init_size=1500,
-                                                           update_target_estimator_every=10,
-                                                           epsilon_start=1,
-                                                           epsilon_end=0.1,
-                                                           epsilon_decay_steps=500000,
-                                                           discount_factor=discount_factor,
-                                                           batch_size=256,
-                                                           num_LabelPropagation=num_LP,
-                                                           num_active_learning=num_AL,
-                                                           test=test,
-                                                           vae_model=vae,
-                                                           include_vae_penalty=True)
-                final_metric, final_aupr = q_learning_validator(env_test, qlearn_estimator,
+        with sess.as_default():
+            episode_rewards, coef_history = q_learning(env, sess, qlearn_estimator, target_estimator,
+                                                       num_episodes=EPISODES, num_epoches=10,
+                                                       experiment_dir=experiment_dir,
+                                                       replay_memory_size=500000,
+                                                       replay_memory_init_size=1500,
+                                                       update_target_estimator_every=10,
+                                                       epsilon_start=1,
+                                                       epsilon_end=0.1,
+                                                       epsilon_decay_steps=500000,
+                                                       discount_factor=discount_factor,
+                                                       batch_size=256,
+                                                       num_LabelPropagation=num_LP,
+                                                       num_active_learning=num_AL,
+                                                       test=test,
+                                                       vae_model=vae,
+                                                       include_vae_penalty=True)
+            final_metric, final_aupr = q_learning_validator(env_test, qlearn_estimator,
                                                     int(env.datasetsize * (1 - validation_separate_ratio)),
                                                     experiment_dir)
-            save_plots(experiment_dir, episode_rewards, coef_history)
-            return final_metric, final_aupr
+        save_plots(experiment_dir, episode_rewards, coef_history)
+        return final_metric, final_aupr
 
 # Uncomment one of the following calls to run training with different hyperparameters.
-#train_wrapper(100, 1000, 0.92)
-#train_wrapper(150, 5000, 0.94)
-#train_wrapper(200, 10000, 0.96)
+# train_wrapper(100, 1000, 0.92)
+# train_wrapper(150, 5000, 0.94)
+# train_wrapper(200, 10000, 0.96)
 train_wrapper(200, 1000, 0.96)
 train_wrapper(200, 5000, 0.96)
 train_wrapper(200, 10000, 0.96)
