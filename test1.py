@@ -1,6 +1,6 @@
 import pandas as pd
 
-path = "SMD/ServerMachineDataset/train/machine-1-1.txt"
-df = pd.read_csv(path, sep=",", header=None)  # if there's no header
-print(df.shape)       # see rows x columns
-print(df.head(10))    # see first 10 rows
+label_path = "SMD/ServerMachineDataset/test_label/machine-1-1.txt"
+label_df = pd.read_csv(label_path, sep=",", header=None)
+print(label_df.shape)
+print(label_df.head(10))
