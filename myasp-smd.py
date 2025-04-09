@@ -42,9 +42,9 @@ EPSILON_DECAY = 1.00        # epsilon decay
 
 # Extrinsic reward values.
 TN_Value = 1    # True Negative
-TP_Value = 5    # True Positive
+TP_Value = 10    # True Positive
 FP_Value = -1   # False Positive
-FN_Value = -5   # False Negative
+FN_Value = -10   # False Negative
 
 # Define action space.
 NOT_ANOMALY = 0
@@ -55,7 +55,7 @@ action_space_n = len(action_space)
 n_steps = 25                # sliding window length
 n_input_dim = 2             # dimension for LSTM (value and action indicator)
 n_hidden_dim = 128          # hidden dimension
-validation_separate_ratio = 0.9
+validation_separate_ratio = 0.8
 
 ########################### VAE Setup #####################
 def load_normal_data(data_path, n_steps):
