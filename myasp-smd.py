@@ -19,17 +19,16 @@ from tensorflow.keras import layers, models, losses, optimizers
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
 
-# Append current directory to sys.path so local modules can be imported.
+# Append current directory to sys.path.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the updated environment (env_smd.py should contain the revised EnvTimeSeriesfromRepo)
+# Import the updated environment.
 from env_smd import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 
-# Set GPU devices.
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 ############################
@@ -46,7 +45,6 @@ TP_Value = 5    # True Positive
 FP_Value = -1   # False Positive
 FN_Value = -5   # False Negative
 
-# Define action space.
 NOT_ANOMALY = 0
 ANOMALY = 1
 action_space = [NOT_ANOMALY, ANOMALY]
@@ -143,7 +141,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
             reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
             vae_penalty = dynamic_coef * vae_scale * reconstruction_error
             print("Reconstruction error: {:.5f}, scaled VAE penalty: {:.5f}".format(reconstruction_error, vae_penalty))
-        # Use the "label" column (updated by active learning) for training rewards.
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
         elif timeseries['label'][timeseries_curser] == 1:
@@ -238,7 +235,7 @@ class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
         self.N = N
-        self.strategy = strategy
+        self.strategy = strategy  # e.g. 'margin_sampling'
         self.estimator = estimator
         self.already_selected = already_selected
 
@@ -347,7 +344,6 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 env.timeseries_curser = sample + n_steps
                 action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps - 1)])
                 action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-                # Warm-up: Copy ground truth from "anomaly" to "label"
                 env.timeseries['label'][env.timeseries_curser] = env.timeseries['anomaly'][env.timeseries_curser]
                 num_label += 1
                 labeled_index.append(sample)
