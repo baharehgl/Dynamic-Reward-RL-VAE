@@ -129,7 +129,6 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
     return None
 
-# VAE scaling factor.
 vae_scale = 10.0
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0, include_vae_penalty=True):
@@ -235,7 +234,7 @@ class active_learning(object):
     def __init__(self, env, N, strategy, estimator, already_selected):
         self.env = env
         self.N = N
-        self.strategy = strategy  # e.g. 'margin_sampling'
+        self.strategy = strategy
         self.estimator = estimator
         self.already_selected = already_selected
 
@@ -549,11 +548,11 @@ def convert_txt_to_csv(directory):
                     print("Error converting {}: {}".format(f, e))
 
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Use the sensor files from the SMD train folder for VAE training.
+    # Use sensor files from the train folder for VAE training.
     train_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(train_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    # For quicker tests, use 20 epochs; for full training, increase this.
+    # For quick tests, train for 20 epochs.
     vae.fit(x_train, epochs=20, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
@@ -561,7 +560,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     for j in range(len(percentage)):
         exp_relative_dir = ['SMD_LP_1500init_warmup_h128_b256_30ep_num_LP' + str(num_LP) +
                             '_num_AL' + str(num_AL) + '_d' + str(discount_factor)]
-        # For the RL environment, use the sensor and label folders.
+        # For the RL environment, use sensor and label folders.
         sensor_dir = os.path.join(current_dir, "SMD", "ServerMachineDataset", "test")
         label_dir = os.path.join(current_dir, "SMD", "ServerMachineDataset", "test_label")
         convert_txt_to_csv(sensor_dir)
