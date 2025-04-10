@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# Import the updated environment (env-smd.py should contain the revised EnvTimeSeriesfromRepo)
+# Import the updated environment (env_smd.py should contain the revised EnvTimeSeriesfromRepo)
 from env_smd import EnvTimeSeriesfromRepo
 from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
