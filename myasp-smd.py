@@ -34,7 +34,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 ############################
 # Macros and Hyperparameters.
 DATAFIXED = 0               # whether target is fixed to a single time series
-EPISODES = 300               # number of episodes (for quick testing)
+EPISODES = 100               # number of episodes
 DISCOUNT_FACTOR = 0.5       # reward discount factor
 EPSILON = 0.5               # epsilon-greedy parameter
 EPSILON_DECAY = 1.00        # epsilon decay
@@ -129,7 +129,7 @@ def RNNBinaryStateFuc(timeseries, timeseries_curser, previous_state=[], action=N
         return np.array([state0, state1], dtype='float32')
     return None
 
-vae_scale = 10.0
+#vae_scale = 10.0
 
 def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynamic_coef=1.0, include_vae_penalty=True):
     if timeseries_curser >= n_steps:
@@ -138,7 +138,8 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action=0, vae=None, dynami
         if include_vae_penalty and vae is not None:
             vae_reconstruction = vae.predict(current_state)
             reconstruction_error = np.mean(np.square(vae_reconstruction - current_state))
-            vae_penalty = dynamic_coef * vae_scale * reconstruction_error
+            vae_penalty = dynamic_coef * reconstruction_error
+            #vae_penalty = dynamic_coef * vae_scale * reconstruction_error
             print("Reconstruction error: {:.5f}, scaled VAE penalty: {:.5f}".format(reconstruction_error, vae_penalty))
         if timeseries['label'][timeseries_curser] == 0:
             return [TN_Value + vae_penalty, FP_Value + vae_penalty]
@@ -292,7 +293,7 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
-               num_LabelPropagation=20, num_active_learning=5, test=0, vae_model=None, include_vae_penalty=True):
+               num_LabelPropagation=20, num_active_learning=10, test=0, vae_model=None, include_vae_penalty=True):
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -552,8 +553,8 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     train_directory = os.path.join(current_dir, "SMD", "ServerMachineDataset", "train")
     x_train = load_normal_data(train_directory, n_steps)
     vae, _ = build_vae(original_dim, latent_dim, intermediate_dim)
-    
-    vae.fit(x_train, epochs=200, batch_size=32)
+
+    vae.fit(x_train, epochs=50, batch_size=32)
     vae.save('vae_model.h5')
     percentage = [1]
     test = 0
