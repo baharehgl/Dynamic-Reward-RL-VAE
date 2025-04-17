@@ -23,7 +23,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters & globals
-EPISODES       = 3
+EPISODES       = 100
 n_steps        = 25
 n_input_dim    = 2
 n_hidden_dim   = 128
@@ -129,8 +129,8 @@ class Q_Estimator_Nonlinear:
 
             state_unstack = tf.compat.v1.unstack(self.state, n_steps, axis=1)
             lstm_cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim)
-            outputs, _ = tf.compat.v1.nn.static_rnn(lstm_cell, state_unstack, dtype=tf.float32)
-            self.action_values = tf.matmul(outputs[-1], self.weights['out']) + self.biases['out']
+            self.outputs, _ = tf.compat.v1.nn.static_rnn(lstm_cell, state_unstack, dtype=tf.float32)
+            self.action_values = tf.matmul(self.outputs[-1], self.weights['out']) + self.biases['out']
 
             self.losses = tf.compat.v1.square(self.action_values - self.target)
             self.loss   = tf.reduce_mean(self.losses)
@@ -147,16 +147,13 @@ class Q_Estimator_Nonlinear:
         sess = sess or tf.compat.v1.get_default_session()
         sess.run(self.train_op, {self.state: state, self.target: target})
 
-
-
 # =============================
 # Helpers
 # =============================
 def copy_model_parameters(sess, estimator1, estimator2):
     e1_params = [v for v in tf.compat.v1.trainable_variables() if v.name.startswith(estimator1.scope)]
     e2_params = [v for v in tf.compat.v1.trainable_variables() if v.name.startswith(estimator2.scope)]
-    for v1, v2 in zip(sorted(e1_params, key=lambda x: x.name),
-                      sorted(e2_params, key=lambda x: x.name)):
+    for v1, v2 in zip(sorted(e1_params, key=lambda x: x.name), sorted(e2_params, key=lambda x: x.name)):
         sess.run(v2.assign(v1))
 
 
@@ -196,18 +193,9 @@ class active_learning:
         rank_ind = [i for i in rank_ind if i not in self.already_selected]
         return rank_ind[:self.N]
 
-    def get_samples_by_score(self, threshold):
-        distances = []
-        for state in self.env.states_list:
-            q = self.estimator.predict([state])[0]
-            distances.append(abs(q[0] - q[1]))
-        rank_ind = np.argsort(distances)
-        return [i for i in rank_ind if distances[i] < threshold and i not in self.already_selected]
-
     def label(self, active_samples):
         for sample in active_samples:
-            print("Active sample:", sample)
-            label = float(input("Label last timestamp (0 normal, 1 anomaly): "))
+            label = float(input("Label sample {} (0 normal, 1 anomaly): ".format(sample)))
             self.env.timeseries.loc[sample + n_steps - 1, 'label'] = label
 
 # =============================
@@ -229,48 +217,38 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000,
                batch_size=256, num_LabelPropagation=20, num_active_learning=10,
                test=0, vae_model=None, include_vae_penalty=True):
+    # Ensure env.states_list is populated before warm-up
+    env.reset()
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
-    checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
-    checkpoint_path = os.path.join(checkpoint_dir, "model")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(experiment_dir + "/checkpoints", exist_ok=True)
     saver = tf.compat.v1.train.Saver()
-    latest = tf.train.latest_checkpoint(checkpoint_dir)
-    if latest:
-        saver.restore(sess, checkpoint_path)
-        if test:
-            return [], []
 
     global_step_var = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope="global_step")[0]
     total_t = sess.run(global_step_var)
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
     policy = make_epsilon_greedy_policy(qlearn_estimator, action_space_n, sess)
 
-    # Warm up
-    data_train = []
-    for s in env.states_list:
-        data_train.append(s[-1][0])
-        if len(data_train) >= replay_memory_init_size:
-            break
-    data_train = np.array(data_train).reshape(-1,1)
+    # Warm up with Isolation Forest
+    data_train = [s[-1][0] for s in env.states_list[:replay_memory_init_size]]
+    data_train = np.array(data_train).reshape(-1, 1)
+    if data_train.shape[0] == 0:
+        raise ValueError("No warm-up data: env.states_list is empty. Did you call env.reset()?")
     model_warm = WarmUp().warm_up_isolation_forest(0.01, data_train)
-    lp_model = LabelSpreading()
 
-    # Initialize labels via Active Learning & LP
-    env_states = env.states_list
-    for sample in list(model_warm.predict(data_train).argsort()[:5]):
-        env.timeseries.loc[sample + n_steps, 'label'] = env.timeseries['anomaly'].iat[sample + n_steps]
+    # Label init using warm-up
+    for idx in np.argsort(model_warm.decision_function(data_train))[:5]:
+        env.timeseries.loc[idx + n_steps, 'label'] = env.timeseries['anomaly'].iat[idx + n_steps]
 
-    # Main Q-learning loop
     dynamic_coef = 20.0
     episode_rewards = []
     coef_history = []
+
     for i in range(num_episodes):
-        env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a,
-                               vae_model, dynamic_coef, include_vae_penalty)
+        env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a, vae_model, dynamic_coef, include_vae_penalty)
+        state = env.reset()
         episode_reward = 0.0
-        for t in itertools.count():
-            state = env.reset() if t==0 else next_state[action]
+        while True:
             action_probs = policy(state, epsilons[min(total_t, epsilon_decay_steps-1)])
             action = np.random.choice(np.arange(action_space_n), p=action_probs)
             next_state, reward, done, _ = env.step(action)
@@ -280,24 +258,24 @@ def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_
                 replay_memory.pop(0)
             if done:
                 break
+            state = next_state[action] if isinstance(next_state, np.ndarray) and next_state.ndim>1 else next_state
             total_t += 1
             if total_t % update_target_estimator_every == 0:
                 copy_model_parameters(sess, qlearn_estimator, target_estimator)
-        # Train for num_epoches
+
+        # Batch training
         for _ in range(num_epoches):
             batch = random.sample(replay_memory, batch_size)
             states_b, rewards_b, next_b, dones_b = map(np.array, zip(*batch))
-            q_next0 = target_estimator.predict(next_b[:,0], sess)
-            q_next1 = target_estimator.predict(next_b[:,1], sess)
-            targets = rewards_b + DISCOUNT_FACTOR * np.stack((np.max(q_next0,1),
-                                                             np.max(q_next1,1)),1)
+            q0 = target_estimator.predict(next_b[:,0], sess)
+            q1 = target_estimator.predict(next_b[:,1], sess)
+            targets = rewards_b + DISCOUNT_FACTOR * np.stack((np.max(q0,1), np.max(q1,1)),1)
             qlearn_estimator.update(states_b, targets, sess)
-        # Update dynamic coef
+
         dynamic_coef = update_dynamic_coef_proportional(dynamic_coef, episode_reward)
         episode_rewards.append(episode_reward)
         coef_history.append(dynamic_coef)
-        # Save
-        saver.save(sess, checkpoint_path)
+        saver.save(sess, experiment_dir + "/checkpoints/model")
 
     return episode_rewards, coef_history
 
