@@ -23,7 +23,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters & globals
-EPISODES       = 100
+EPISODES       = 3
 n_steps        = 25
 n_input_dim    = 2
 n_hidden_dim   = 128
