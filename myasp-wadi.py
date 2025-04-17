@@ -23,7 +23,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters & globals
-EPISODES       = 100
+EPISODES       = 2
 n_steps        = 25
 n_input_dim    = 2
 n_hidden_dim   = 128
@@ -354,7 +354,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     scaler = StandardScaler().fit(X)
     Xs = scaler.transform(X)
     vae, _ = build_vae(n_steps, latent_dim=10, intermediate_dim=64)
-    vae.fit(Xs, epochs=30, batch_size=32)
+    vae.fit(Xs, epochs=2, batch_size=32)
     vae.save('vae_wadi.h5')
 
     # 2) Env instantiation
