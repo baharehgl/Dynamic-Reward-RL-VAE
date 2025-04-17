@@ -16,45 +16,52 @@ def defaultRewardFuc(timeseries, timeseries_curser, action):
 class EnvTimeSeriesWaDi:
     """
     Environment wrapper for WaDi dataset. Reads one sensor CSV and one label CSV,
-    exposes timeseries DataFrame with columns ['value','anomaly','label'].
+    aligns lengths, exposes timeseries DataFrame with columns ['value','anomaly','label'].
     Usage:
         env = EnvTimeSeriesWaDi(sensor_csv, label_csv, n_steps)
     """
     def __init__(self, sensor_csv, label_csv, n_steps):
-        # 1) Load sensor data
+        # Load sensor data
         df_sensor = pd.read_csv(sensor_csv)
-
-        # 2) Load label data, skip first two header rows, take last column
+        # Load label data, skip header rows
         df_label = pd.read_csv(label_csv, header=None, low_memory=False)
         raw_labels = df_label.iloc[2:, -1].astype(int).reset_index(drop=True)
         # map WaDi labels (1 → normal, -1 → attack) to (0,1)
-        labels = raw_labels.replace({1: 0, -1: 1})
+        labels = raw_labels.replace({1: 0, -1: 1}).values
 
-        # 3) Build merged DataFrame
+        # Align lengths
+        len_sensor = len(df_sensor)
+        len_labels = len(labels)
+        min_len = min(len_sensor, len_labels)
+
+        # Trim sensor and labels to same length
+        values = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].astype(float).values[:min_len]
+        labels = labels[:min_len]
+
+        # Build merged DataFrame: 'value', 'anomaly', 'label'(-1 init)
         ts = pd.DataFrame({
-            'value':   df_sensor['TOTAL_CONS_REQUIRED_FLOW'].astype(float),
+            'value':   values,
             'anomaly': labels,
-            'label':   [-1] * len(labels)
-        }).astype(np.float32)
+            'label':   np.full(min_len, -1, dtype=np.int32)
+        })
 
         # store attributes
-        self.timeseries_repo        = [ts]
-        self.timeseries            = None
+        self.timeseries_repo        = [ts.astype(np.float32)]
+        self.timeseries             = None
         self.timeseries_curser_init = n_steps
         self.timeseries_curser      = -1
-        self.statefnc              = defaultStateFuc
-        self.rewardfnc             = defaultRewardFuc
-        self.action_space_n        = 2
-        self.datasetsize           = 1
-        self.datasetrng            = 1
-        self.datasetidx            = 0
-        self.states_list           = []
+        self.statefnc               = defaultStateFuc
+        self.rewardfnc              = defaultRewardFuc
+        self.action_space_n         = 2
+        self.datasetsize            = 1
+        self.datasetrng             = 1
+        self.datasetidx             = 0
+        self.states_list            = []
 
     def reset(self):
         """Reset cursor and return initial state."""
         self.timeseries = self.timeseries_repo[0]
         self.timeseries_curser = self.timeseries_curser_init
-        # initial state
         self.timeseries_states = self.statefnc(self.timeseries, self.timeseries_curser)
         self.states_list = self.get_states_list()
         return self.timeseries_states
