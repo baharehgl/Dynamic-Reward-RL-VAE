@@ -23,7 +23,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters & globals
-EPISODES       = 2
+EPISODES       = 100
 n_steps        = 25
 n_input_dim    = 2
 n_hidden_dim   = 128
@@ -92,7 +92,6 @@ def RNNBinaryRewardFuc(timeseries, timeseries_curser, action, vae=None,
                        dynamic_coef=1.0, include_vae_penalty=True):
     if timeseries_curser < n_steps:
         return [0,0]
-    # VAE penalty
     vae_penalty = 0.0
     if include_vae_penalty and vae is not None:
         window = timeseries['value'].values[timeseries_curser-n_steps:timeseries_curser].reshape(1, -1)
@@ -147,6 +146,8 @@ class Q_Estimator_Nonlinear:
     def update(self, state, target, sess=None):
         sess = sess or tf.compat.v1.get_default_session()
         sess.run(self.train_op, {self.state: state, self.target: target})
+
+
 
 # =============================
 # Helpers
