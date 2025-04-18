@@ -9,34 +9,27 @@ def defaultRewardFuc(timeseries, timeseries_curser, action):
     return 1 if action == timeseries['anomaly'][timeseries_curser] else -1
 
 class EnvTimeSeriesWaDi:
-    """
-    WaDi env wrapper. Reads:
-      WaDi/WADI_14days_new.csv
-      WaDi/WADI_attackdataLABLE.csv
-    """
     def __init__(self, sensor_csv, label_csv, n_steps):
-        if not os.path.isfile(sensor_csv):
-            raise FileNotFoundError(f"Sensor CSV not found: {sensor_csv}")
-        if not os.path.isfile(label_csv):
-            raise FileNotFoundError(f"Label CSV not found: {label_csv}")
-
-        # 1) Load sensor & label
+        # 1) sensor
         df_sensor = pd.read_csv(sensor_csv)
-        df_label  = pd.read_csv(label_csv, header=None, low_memory=False)
-        raw = df_label.iloc[2:, -1].astype(int).reset_index(drop=True)
-        labels = raw.replace({1:0, -1:1}).values
 
-        # 2) Align lengths
+        # 2) label — skip the first row, use second row as header
+        df_label    = pd.read_csv(label_csv, header=1, low_memory=False)
+        labels_raw  = df_label["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
+        # map 1->0 normal, -1->1 attack
+        labels      = np.where(labels_raw == 1, 0, 1)
+
+        # 3) align lengths
         L = min(len(df_sensor), len(labels))
-        vals   = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].astype(float).values[:L]
+        vals   = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].values[:L]
         labels = labels[:L]
 
-        # 3) Build unified DataFrame
+        # 4) build timeseries DataFrame
         ts = pd.DataFrame({
-            'value':   vals,
-            'anomaly': labels,
+            'value':   vals.astype(np.float32),
+            'anomaly': labels.astype(np.int32),
             'label':   np.full(L, -1, dtype=np.int32)
-        }).astype(np.float32)
+        })
 
         self.timeseries_repo        = [ts]
         self.timeseries_curser_init = n_steps
