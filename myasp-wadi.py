@@ -223,6 +223,14 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     sess = tf.compat.v1.Session(); K.set_session(sess)
     vae_model = load_model('vae_wadi.h5', custom_objects={'Sampling': Sampling}, compile=False)
     env = EnvTimeSeriesWaDi('WaDi/WADI_14days_new.csv', 'WaDi/WADI_attackdataLABLE.csv', n_steps)
+
+    # switch to RNN-based state & dynamic reward functions
+    env.statefnc  = RNNBinaryStateFuc
+    env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(ts, tc, a,
+                                vae_model=vae_model,
+                                dynamic_coef=10.0,
+                                include_vae_penalty=True)
+
     q_learn = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qlearn')
     q_target = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qtarget')
     rewards, coefs = q_learning(env, sess, q_learn, q_target,
