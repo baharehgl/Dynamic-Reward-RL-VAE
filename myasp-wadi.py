@@ -22,7 +22,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters
-episodes = 100
+episodes = 3
 n_steps = 25
 discount = 0.5
 TN, TP, FP, FN = 1, 10, -1, -10
@@ -214,7 +214,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     X = np.array([vals[i:i+n_steps] for i in range(len(vals)-n_steps)])
     scaler = StandardScaler().fit(X); Xs=scaler.transform(X)
     vae = build_vae(n_steps)
-    with sess_vae.as_default(): vae.fit(Xs,epochs=30,batch_size=32)
+    with sess_vae.as_default(): vae.fit(Xs,epochs=3,batch_size=32)
     vae.save('vae_wadi.h5'); sess_vae.close()
 
     # RL training
