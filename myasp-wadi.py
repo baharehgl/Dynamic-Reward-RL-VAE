@@ -27,6 +27,11 @@ DISCOUNT       = 0.5
 TN, TP, FP, FN = 1, 10, -1, -10
 ACTION_SPACE_N = 2
 
+# Paths
+WADI_DIR   = "WaDi"
+SENSOR_CSV = os.path.join(WADI_DIR, "WADI_14days_new.csv")
+LABEL_CSV  = os.path.join(WADI_DIR, "WADI_attackdataLABLE.csv")
+
 # ==== VAE Setup ====
 class Sampling(layers.Layer):
     def call(self, inputs):
@@ -96,16 +101,16 @@ class Q_Estimator_Nonlinear:
         self.scope = scope
         with tf.compat.v1.variable_scope(scope):
             self.state  = tf.compat.v1.placeholder(tf.float32,
-                            [None, N_STEPS, N_INPUT_DIM], name='state')
+                              [None, N_STEPS, N_INPUT_DIM], name='state')
             self.target = tf.compat.v1.placeholder(tf.float32,
-                            [None, ACTION_SPACE_N],   name='target')
+                              [None, ACTION_SPACE_N],   name='target')
             unstack    = tf.compat.v1.unstack(self.state, N_STEPS, axis=1)
-            cell = tf.compat.v1.nn.rnn_cell.LSTMCell(N_HIDDEN_DIM)
+            cell       = tf.compat.v1.nn.rnn_cell.LSTMCell(N_HIDDEN_DIM)
             outputs, _ = tf.compat.v1.nn.static_rnn(cell, unstack, dtype=tf.float32)
-            self.logits = layers.Dense(ACTION_SPACE_N)(outputs[-1])
-            self.loss   = tf.reduce_mean(tf.square(self.logits - self.target))
+            self.logits   = layers.Dense(ACTION_SPACE_N)(outputs[-1])
+            self.loss     = tf.reduce_mean(tf.square(self.logits - self.target))
             self.train_op = tf.compat.v1.train.AdamOptimizer(learning_rate)\
-                             .minimize(self.loss)
+                              .minimize(self.loss)
 
     def predict(self, state, sess):
         return sess.run(self.logits, {self.state: state})
@@ -124,10 +129,10 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
     return policy_fn
 
 def copy_model_parameters(sess, src, dest):
-    s_vars  = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
-                                           scope=src.scope)
-    d_vars  = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
-                                           scope=dest.scope)
+    s_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
+                                            scope=src.scope)
+    d_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
+                                            scope=dest.scope)
     for s, d in zip(sorted(s_vars, key=lambda v:v.name),
                     sorted(d_vars, key=lambda v:v.name)):
         sess.run(d.assign(s))
@@ -145,10 +150,10 @@ class active_learning:
         self.estimator = estimator; self.already = already_selected
 
     def get_samples(self):
-        dists = []
+        dists=[]
         for s in self.env.states_list:
             q = self.estimator.predict([s], self.estimator.session)[0]
-            dists.append(abs(q[0] - q[1]))
+            dists.append(abs(q[0]-q[1]))
         idx = np.argsort(dists)
         return [i for i in idx if i not in self.already][:self.N]
 
@@ -158,8 +163,9 @@ def q_learning(env, sess, q_learn, q_target,
                update_target_every,
                epsilon_start, epsilon_end, epsilon_steps,
                batch_size, dynamic_coef, discount_factor):
-    Transition = namedtuple('T', ['state','reward','next','done'])
-    memory = []; sess.run(tf.compat.v1.global_variables_initializer())
+    Transition = namedtuple('T',['state','reward','next','done'])
+    memory=[]
+    sess.run(tf.compat.v1.global_variables_initializer())
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_steps)
     policy   = make_epsilon_greedy_policy(q_learn, ACTION_SPACE_N, sess)
 
@@ -180,24 +186,19 @@ def q_learning(env, sess, q_learn, q_target,
             a  = np.random.choice(ACTION_SPACE_N, p=ap)
             nxt, r, done, _ = env.step(a)
             ep_reward += r[a]
-            memory.append(Transition(state, r, nxt, done))
+            memory.append(Transition(state,r,nxt,done))
             if done: break
-            # pick branch
-            if isinstance(nxt, np.ndarray) and nxt.ndim>2:
-                state = nxt[a]
-            else:
-                state = nxt
-            t += 1
+            state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
+            t+=1
             if t % update_target_every == 0:
                 copy_model_parameters(sess, q_learn, q_target)
 
-        # train
         for _ in range(num_epoches):
             batch = random.sample(memory, batch_size)
             S,R,NS,D = map(np.array, zip(*batch))
             q0 = q_target.predict(NS[:,0], sess)
             q1 = q_target.predict(NS[:,1], sess)
-            targets = R + discount_factor * np.stack((q0.max(1), q1.max(1)), axis=1)
+            targets = R + discount_factor * np.stack((q0.max(1),q1.max(1)),axis=1)
             q_learn.update(S, targets, sess)
 
         rewards.append(ep_reward)
@@ -208,7 +209,7 @@ def q_learning(env, sess, q_learn, q_target,
 # ==== Validator ====
 def q_learning_validator(env, sess, trained):
     state = env.reset(); preds, gts = [], []
-    policy= make_epsilon_greedy_policy(trained, ACTION_SPACE_N, sess)
+    policy = make_epsilon_greedy_policy(trained, ACTION_SPACE_N, sess)
     while True:
         a = np.argmax(policy(state,0))
         preds.append(a)
@@ -217,17 +218,17 @@ def q_learning_validator(env, sess, trained):
         if done: break
         state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-    p,r,f,_ = precision_recall_fscore_support(gts, preds, average='binary')
-    aupr = average_precision_score(gts, preds)
+    p,r,f,_ = precision_recall_fscore_support(gts,preds,average='binary')
+    aupr = average_precision_score(gts,preds)
     return f, aupr
 
 # ==== Plotting ====
 def save_plots(exp_dir, rewards, coefs):
     os.makedirs(exp_dir, exist_ok=True)
     plt.figure(); plt.plot(rewards); plt.title('Rewards')
-    plt.savefig(os.path.join(exp_dir, 'rewards.png')); plt.close()
+    plt.savefig(os.path.join(exp_dir,'rewards.png')); plt.close()
     plt.figure(); plt.plot(coefs);   plt.title('Coefs')
-    plt.savefig(os.path.join(exp_dir, 'coefs.png'));   plt.close()
+    plt.savefig(os.path.join(exp_dir,'coefs.png'));   plt.close()
 
 # ==== Main Training Wrapper ====
 def train_wrapper(num_LP, num_AL, discount_factor):
@@ -236,14 +237,14 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     from tensorflow.compat.v1.keras import backend as K
     sess_vae = tf.compat.v1.Session(); K.set_session(sess_vae)
 
-    df = pd.read_csv('WADI_14days_new.csv')
+    df = pd.read_csv(SENSOR_CSV)
     vals = df['TOTAL_CONS_REQUIRED_FLOW'].values
-    X = np.array([vals[i:i+N_STEPS] for i in range(len(vals)-N_STEPS)])
+    X    = np.array([vals[i:i+N_STEPS] for i in range(len(vals)-N_STEPS)])
     scaler = StandardScaler().fit(X); Xs = scaler.transform(X)
 
     vae = build_vae(N_STEPS)
     with sess_vae.as_default():
-        vae.fit(Xs, epochs=2, batch_size=32, verbose=0)
+        vae.fit(Xs, epochs=3, batch_size=32, verbose=0)
     vae.save('vae_model.h5')
     sess_vae.close()
 
@@ -254,13 +255,13 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     K2.set_session(sess)
 
     vae_model = load_model('vae_model.h5', custom_objects={'Sampling': Sampling}, compile=False)
-    env = EnvTimeSeriesWaDi('WADI_14days_new.csv', 'WADI_attackdataLABLE.csv', N_STEPS)
+    env        = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
     env.statefnc  = RNNBinaryStateFuc
     env.rewardfnc = lambda ts, tc, a: RNNBinaryRewardFuc(
-                          ts, tc, a,
-                          vae_model=vae_model,
-                          dynamic_coef=20.0,
-                          include_vae_penalty=True)
+                           ts, tc, a,
+                           vae_model=vae_model,
+                           dynamic_coef=20.0,
+                           include_vae_penalty=True)
 
     q_learn  = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qlearn')
     q_target = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qtarget')
