@@ -18,15 +18,17 @@ from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 from env_wadi import EnvTimeSeriesWaDi
 
-# Disable eager execution
+# Disable eager execution for TF1.x style
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters
 episodes = 3
 n_steps = 25
+n_input_dim = 2
+n_hidden_dim = 128
+
 discount = 0.5
 TN, TP, FP, FN = 1, 10, -1, -10
-
 action_space_n = 2
 
 # ==== VAE Definition ====
@@ -81,7 +83,7 @@ def RNNBinaryRewardFuc(ts, cursor, action, vae_model=None, dynamic_coef=1.0, inc
         err = np.mean((recon - window)**2)
         penalty = dynamic_coef * err
     lbl = ts['label'].iat[cursor]
-    return [TN+penalty, FP+penalty] if lbl==0 else [FN+penalty, TP+penalty]
+    return [TN + penalty, FP + penalty] if lbl==0 else [FN + penalty, TP + penalty]
 
 def RNNBinaryRewardFucTest(ts, cursor, action):
     if cursor < n_steps:
@@ -94,11 +96,12 @@ class Q_Estimator_Nonlinear:
     def __init__(self, learning_rate=0.0003, scope='qlearn'):
         self.scope = scope
         with tf.compat.v1.variable_scope(scope):
-            self.state = tf.compat.v1.placeholder(tf.float32, [None, n_steps, 2], name='state')
+            # state shape: [None, n_steps, n_input_dim]
+            self.state = tf.compat.v1.placeholder(tf.float32, [None, n_steps, n_input_dim], name='state')
             self.target = tf.compat.v1.placeholder(tf.float32, [None, action_space_n], name='target')
             unstack = tf.compat.v1.unstack(self.state, n_steps, axis=1)
             cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim)
-            outputs,_ = tf.compat.v1.nn.static_rnn(cell, unstack, dtype=tf.float32)
+            outputs, _ = tf.compat.v1.nn.static_rnn(cell, unstack, dtype=tf.float32)
             self.logits = layers.Dense(action_space_n)(outputs[-1])
             self.loss = tf.reduce_mean(tf.square(self.logits - self.target))
             self.optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate).minimize(self.loss)
@@ -107,6 +110,7 @@ class Q_Estimator_Nonlinear:
     def update(self, state, target, sess):
         sess.run(self.optimizer, feed_dict={self.state: state, self.target: target})
 
+# ==== Helpers ====
 def make_epsilon_greedy_policy(estimator, nA, sess):
     def policy_fn(obs, eps):
         A = np.ones(nA) * eps / nA
@@ -118,7 +122,7 @@ def make_epsilon_greedy_policy(estimator, nA, sess):
 
 def copy_model_parameters(sess, src, dest):
     src_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope=src.scope)
-    dest_vars= tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope=dest.scope)
+    dest_vars = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope=dest.scope)
     for s, d in zip(sorted(src_vars, key=lambda v: v.name), sorted(dest_vars, key=lambda v: v.name)):
         sess.run(d.assign(s))
 
@@ -127,10 +131,10 @@ class active_learning:
     def __init__(self, env, N, estimator, already_selected):
         self.env = env; self.N = N; self.estimator = estimator; self.already = already_selected
     def get_samples(self):
-        distances=[]
+        distances = []
         for s in self.env.states_list:
             q = self.estimator.predict([s], self.estimator.session)[0]
-            distances.append(abs(q[0]-q[1]))
+            distances.append(abs(q[0] - q[1]))
         idx = np.argsort(distances)
         return [i for i in idx if i not in self.already][:self.N]
 
@@ -141,7 +145,7 @@ class WarmUp:
         clf.fit(data)
         return clf
 
-# ==== Q-Learning & Validation ====
+# ==== Q-Learning ====
 def q_learning(env, sess, q_learn, q_target, num_episodes, num_epoches,
                update_target_every, epsilon_start, epsilon_end, epsilon_steps,
                batch_size, dynamic_coef):
@@ -150,52 +154,49 @@ def q_learning(env, sess, q_learn, q_target, num_episodes, num_epoches,
     sess.run(tf.compat.v1.global_variables_initializer())
     epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_steps)
     policy = make_epsilon_greedy_policy(q_learn, action_space_n, sess)
-    replay_init=5000
-    # Warm-up sequence
+    replay_init = 5000
     state = env.reset()
-    states_list = env.states_list
-    data_train = np.array([s[-1][0] for s in states_list[:replay_init]]).reshape(-1,1)
-    if len(data_train)==0:
+    data_train = np.array([s[-1][0] for s in env.states_list[:replay_init]]).reshape(-1,1)
+    if len(data_train) == 0:
         raise ValueError('No warm-up data. Call env.reset().')
     warm_clf = WarmUp().warm_up_isolation_forest(0.01, data_train)
-    # Main loop
-    rewards=[]; coefs=[]; t=0
+    rewards, coefs = [], []
+    t = 0
     for ep in range(num_episodes):
-        state = env.reset(); ep_reward=0
+        state = env.reset(); ep_reward = 0
         while True:
-            action_probs = policy(state, epsilons[min(t,epsilon_steps-1)])
+            action_probs = policy(state, epsilons[min(t, epsilon_steps-1)])
             action = np.random.choice(action_space_n, p=action_probs)
-            next_state,reward,done,_ = env.step(action)
-            ep_reward+=reward[action]
-            memory.append(Transition(state,reward,next_state,done))
+            next_state, reward, done, _ = env.step(action)
+            ep_reward += reward[action]
+            memory.append(Transition(state, reward, next_state, done))
             if done: break
-            state = next_state[action] if isinstance(next_state,np.ndarray) else next_state
-            t+=1
-            if t%update_target_every==0:
+            state = next_state[action] if isinstance(next_state, np.ndarray) else next_state
+            t += 1
+            if t % update_target_every == 0:
                 copy_model_parameters(sess, q_learn, q_target)
-        # training
         for _ in range(num_epoches):
             batch = random.sample(memory, batch_size)
-            S,R,NS,D = map(np.array, zip(*batch))
-            q0 = q_target.predict(NS[:,0],sess); q1 = q_target.predict(NS[:,1],sess)
-            targets = R + discount * np.stack((q0.max(1),q1.max(1)),1)
-            q_learn.update(S,targets,sess)
-        rewards.append(ep_reward); coefs.append(dynamic_coef)
+            S, R, NS, D = map(np.array, zip(*batch))
+            q0 = q_target.predict(NS[:,0], sess)
+            q1 = q_target.predict(NS[:,1], sess)
+            targets = R + discount * np.stack((q0.max(1), q1.max(1)), axis=1)
+            q_learn.update(S, targets, sess)
+        rewards.append(ep_reward)
+        coefs.append(dynamic_coef)
     return rewards, coefs
 
 def q_learning_validator(env, sess, trained_estimator):
-    # simple validation: one episode
-    state = env.reset(); preds=[]; gts=[]
+    state = env.reset(); preds, gts = [], []
     policy = make_epsilon_greedy_policy(trained_estimator, action_space_n, sess)
     while True:
-        action = np.argmax(policy(state,0))
+        action = np.argmax(policy(state, 0))
         preds.append(action)
-        gt = env.timeseries['anomaly'].iat[env.timeseries_curser]
-        gts.append(gt)
-        state,_,done,_ = env.step(action)
+        gts.append(env.timeseries['anomaly'].iat[env.timeseries_curser])
+        state, _, done, _ = env.step(action)
         if done: break
-    precision,recall,f1,_ = precision_recall_fscore_support(gts,preds,average='binary')
-    aupr = average_precision_score(gts,preds)
+    precision, recall, f1, _ = precision_recall_fscore_support(gts, preds, average='binary')
+    aupr = average_precision_score(gts, preds)
     return f1, aupr
 
 def save_plots(exp_dir, rewards, coefs):
@@ -205,25 +206,25 @@ def save_plots(exp_dir, rewards, coefs):
 
 # ==== Training Wrapper ====
 def train_wrapper(num_LP, num_AL, discount_factor):
-    # Train VAE
+    # VAE pretraining
     tf.compat.v1.reset_default_graph()
     from tensorflow.compat.v1.keras import backend as K
     sess_vae = tf.compat.v1.Session(); K.set_session(sess_vae)
     df = pd.read_csv('WaDi/WADI_14days_new.csv')
     vals = df['TOTAL_CONS_REQUIRED_FLOW'].values
     X = np.array([vals[i:i+n_steps] for i in range(len(vals)-n_steps)])
-    scaler = StandardScaler().fit(X); Xs=scaler.transform(X)
+    scaler = StandardScaler().fit(X); Xs = scaler.transform(X)
     vae = build_vae(n_steps)
-    with sess_vae.as_default(): vae.fit(Xs,epochs=3,batch_size=32)
+    with sess_vae.as_default(): vae.fit(Xs, epochs=3, batch_size=32)
     vae.save('vae_wadi.h5'); sess_vae.close()
 
     # RL training
     tf.compat.v1.reset_default_graph()
     sess = tf.compat.v1.Session(); K.set_session(sess)
     vae_model = load_model('vae_wadi.h5', custom_objects={'Sampling': Sampling}, compile=False)
-    env = EnvTimeSeriesWaDi('WaDi/WADI_14days_new.csv','WaDi/WADI_attackdataLABLE.csv',n_steps)
-    q_learn = Q_Estimator_Nonlinear(scope='qlearn')
-    q_target = Q_Estimator_Nonlinear(scope='qtarget')
+    env = EnvTimeSeriesWaDi('WaDi/WADI_14days_new.csv', 'WaDi/WADI_attackdataLABLE.csv', n_steps)
+    q_learn = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qlearn')
+    q_target = Q_Estimator_Nonlinear(learning_rate=0.0003, scope='qtarget')
     rewards, coefs = q_learning(env, sess, q_learn, q_target,
                                 num_episodes=episodes,
                                 num_epoches=10,
@@ -233,10 +234,10 @@ def train_wrapper(num_LP, num_AL, discount_factor):
                                 epsilon_steps=50000,
                                 batch_size=256,
                                 dynamic_coef=10.0)
-    f1,aupr = q_learning_validator(env, sess, q_learn)
+    f1, aupr = q_learning_validator(env, sess, q_learn)
     exp_dir = f'exp_WaDi_LP{num_LP}_AL{num_AL}_d{discount_factor}'
     save_plots(exp_dir, rewards, coefs)
-    print(f"LP={num_LP}, AL={num_AL}, d={discount_factor} → F1={f1:.4f}, AUPR={aupr:.4f}")
+    print(f'LP={num_LP}, AL={num_AL}, d={discount_factor} → F1={f1:.4f}, AUPR={aupr:.4f}')
 
 if __name__ == '__main__':
     train_wrapper(200, 1000, 0.96)
