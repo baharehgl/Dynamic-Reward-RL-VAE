@@ -20,7 +20,7 @@ tf.compat.v1.disable_eager_execution()
 ###############################
 # Hyperparameters & Paths
 ###############################
-EPISODES                  = 100
+EPISODES                  = 2
 N_STEPS                   = 25
 N_INPUT_DIM               = 2
 N_HIDDEN_DIM              = 128
@@ -293,7 +293,7 @@ def pretrain_vae():
     vae = build_vae(N_STEPS)
     print("Training VAE on normal windows…")
     with sess.as_default():
-        vae.fit(Xs, epochs=50, batch_size=32, verbose=1)
+        vae.fit(Xs, epochs=2, batch_size=32, verbose=1)
     vae.save('vae_wadi.h5')
     sess.close()
 
