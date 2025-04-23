@@ -177,7 +177,7 @@ def q_learning(env,sess,ql,qt,
     _=WarmUp().warm_up_isolation_forest(0.01,X)
 
     # initial label propagation
-    lp_model = __import__('sklearn').semi_supervised.LabelSpreading()
+    lp_model = __import__('sklearn.semi_supervised', fromlist=['LabelSpreading']).LabelSpreading()
     # pseudo-label first LP windows
     state_list = np.array(env.states_list).reshape(len(env.states_list),-1)
     labels_init = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
