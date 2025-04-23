@@ -8,6 +8,7 @@ import tensorflow as tf
 from collections import namedtuple
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
+from sklearn.semi_supervised import LabelSpreading
 from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 
@@ -55,8 +56,8 @@ def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
     z         = Sampling()([z_mean,z_log_var])
     dh        = layers.Dense(intermediate_dim,activation='relu')
     dm        = layers.Dense(original_dim,activation='sigmoid')
-    h_dec     = dh(z)
-    out       = dm(h_dec)
+    out       = dm(dh(z))
+
     vae       = models.Model(inp,out)
     recon     = losses.mse(inp,out)*original_dim
     kl        = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
@@ -164,7 +165,7 @@ def q_learning(env,sess,ql,qt,
                eps_start,eps_end,eps_steps,
                batch_size,coef,discount,
                num_LP, num_AL):
-    Transition=namedtuple("Transition",["state","reward","next_state","done"])
+    Transition=namedtuple("T",["state","reward","next_state","done"])
     memory=[]
     sess.run(tf.compat.v1.global_variables_initializer())
     epsilons=np.linspace(eps_start,eps_end,eps_steps)
@@ -172,40 +173,46 @@ def q_learning(env,sess,ql,qt,
 
     # warm-up
     env.reset()
-    data= [s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
-    X = np.array([s[-1][0] for s in data]).reshape(-1,1)
+    data=[s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
+    X=np.array([s[-1][0] for s in data]).reshape(-1,1)
     _=WarmUp().warm_up_isolation_forest(0.01,X)
 
-    # initial label propagation
-    lp_model = __import__('sklearn.semi_supervised', fromlist=['LabelSpreading']).LabelSpreading()
-    # pseudo-label first LP windows
-    state_list = np.array(env.states_list).reshape(len(env.states_list),-1)
-    labels_init = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
-    lp_model.fit(state_list,labels_init)
-    for idx in np.argsort(__import__('scipy').stats.entropy(lp_model.label_distributions_.T))[:num_LP]:
-        env.timeseries['label'].iat[idx+N_STEPS]=lp_model.transduction_[idx]
-
     for ep in range(num_episodes):
-        # active learning
+        # --- LabelSpreading on a subsample to avoid OOM ---
+        state_list = np.array(env.states_list)
+        label_list = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
+        M = min(len(state_list), 5000)
+        idxs = random.sample(range(len(state_list)), M)
+        sub_states = state_list[idxs]
+        sub_labels = label_list[idxs]
+        lp_model = LabelSpreading(kernel='knn', n_neighbors=10)
+        lp_model.fit(sub_states, sub_labels)
+        ent = np.apply_along_axis(lambda d: -np.sum(d*np.log(d+1e-12)), 1, lp_model.label_distributions_)
+        uncert = np.argsort(ent)[:num_LP]
+        for u in uncert:
+            orig = idxs[u] + N_STEPS
+            env.timeseries['label'].iat[orig] = lp_model.transduction_[u]
+
+        # --- Active Learning ---
         labeled_idx=[i for i in range(len(env.timeseries['label'])) if env.timeseries['label'].iat[i]!=-1]
         al=active_learning(env,num_AL,ql,labeled_idx)
-        samples=al.get_samples()
-        for s in samples:
-            env.timeseries['label'].iat[s+N_STEPS]=env.timeseries['anomaly'].iat[s+N_STEPS]
+        for s in al.get_samples():
+            env.timeseries['label'].iat[s+N_STEPS] = env.timeseries['anomaly'].iat[s+N_STEPS]
 
-        state=env.reset(); ep_r=0
+        # --- one episode rollout ---
+        state, ep_r = env.reset(), 0
         while True:
             a=np.random.choice(ACTION_SPACE_N,p=policy(state,epsilons[0]))
             nxt,r,done,_=env.step(a)
             ep_r+=r[a]
             memory.append(Transition(state,r,nxt,done))
             if done: break
-            state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
+            state=nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-        # training
+        # --- training steps ---
         for _ in range(num_epoches):
             batch=random.sample(memory,batch_size)
-            S,R,NS,D=map(np.array,zip(*batch))
+            S,R,NS,D = map(np.array,zip(*batch))
             q0=qt.predict(NS[:,0],sess); q1=qt.predict(NS[:,1],sess)
             tgt=R+discount*np.stack((q0.max(1),q1.max(1)),axis=1)
             ql.update(S,tgt,sess)
@@ -218,15 +225,15 @@ def q_learning(env,sess,ql,qt,
 ####################
 def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
     os.makedirs(record_dir,exist_ok=True)
-    f=open(os.path.join(record_dir,'performance.txt'),'w')
-    precision_all,recall_all,f1_all,aupr_all=[],[],[],[]
+    f=open(os.path.join(record_dir,'perf.txt'),'w')
+    all_f1,all_aupr=[],[]
     for i in range(EPISODES):
         policy=make_epsilon_greedy_policy(trained,ACTION_SPACE_N,sess)
         state=env.reset()
         while env.timeseries_curser<split_idx:
             state,_,done,_=env.step(0)
             if done: break
-        preds,gts,ts_vals=[],[],[]
+        preds, gts, ts_vals = [],[],[]
         while True:
             a=np.argmax(policy(state,0))
             preds.append(a)
@@ -234,38 +241,35 @@ def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
             ts_vals.append(state[-1][0])
             state,_,done,_=env.step(a)
             if done: break
-            if isinstance(state,np.ndarray) and state.ndim>2:
-                state=state[a]
+            if isinstance(state,np.ndarray) and state.ndim>2: state=state[a]
         p,r,f1,_=precision_recall_fscore_support(gts,preds,average='binary',zero_division=0)
         aupr=average_precision_score(gts,preds)
-        f.write(f"Ep{i+1}:P={p:.3f},R={r:.3f},F1={f1:.3f},AUPR={aupr:.3f}\n")
-        precision_all.append(p); recall_all.append(r)
-        f1_all.append(f1); aupr_all.append(aupr)
+        f.write(f"E{i+1}:P={p:.3f},R={r:.3f},F1={f1:.3f},AUPR={aupr:.3f}\n")
+        all_f1.append(f1); all_aupr.append(aupr)
         if plot:
             fig,ax=plt.subplots(4,1,sharex=True)
             ax[0].plot(ts_vals);ax[0].set_title('TS')
             ax[1].plot(preds,'g-');ax[1].set_title('Pred')
             ax[2].plot(gts,'r-');ax[2].set_title('GT')
             ax[3].plot([aupr]*len(ts_vals),'m-');ax[3].set_title('AUPR')
-            fig.savefig(os.path.join(record_dir,f'val_ep{i+1}.png'));plt.close(fig)
+            fig.savefig(os.path.join(record_dir,f'v{i+1}.png'));plt.close(fig)
     f.close()
-    return np.mean(f1_all),np.mean(aupr_all)
+    return np.mean(all_f1), np.mean(all_aupr)
 
 ###################
 # Plotting
 ###################
-def save_plots(dir,rewards,coefs):
-    os.makedirs(dir,exist_ok=True)
-    plt.figure();plt.plot(rewards);plt.title('Rewards');plt.savefig(os.path.join(dir,'rewards.png'));plt.close()
-    plt.figure();plt.plot(coefs);plt.title('Coefs');plt.savefig(os.path.join(dir,'coefs.png'));plt.close()
+def save_plots(d,rews,coefs):
+    os.makedirs(d,exist_ok=True)
+    plt.figure();plt.plot(rews);plt.title('Rew');plt.savefig(os.path.join(d,'rews.png'));plt.close()
+    plt.figure();plt.plot(coefs);plt.title('Coefs');plt.savefig(os.path.join(d,'coefs.png'));plt.close()
 
 ####################
 # Main
 ####################
 def pretrain_vae():
     tf.compat.v1.reset_default_graph()
-    from tensorflow.compat.v1.keras import backend as K
-    sess=tf.compat.v1.Session();K.set_session(sess)
+    from tensorflow.compat.v1.keras import backend as K; sess= tf.compat.v1.Session(); K.set_session(sess)
     df=pd.read_csv(SENSOR_CSV)
     raw=pd.read_csv(LABEL_CSV,header=1,low_memory=False)["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
     labels=np.where(raw==1,0,1);L=min(len(df),len(labels))
@@ -275,30 +279,27 @@ def pretrain_vae():
     X=np.array(W,dtype=np.float32)
     scaler=StandardScaler().fit(X);Xs=scaler.transform(X)
     vae=build_vae(N_STEPS)
-    print("VAE training…")
-    with sess.as_default():vae.fit(Xs,epochs=2,batch_size=32,verbose=1)
-    vae.save('vae_wadi.h5');sess.close()
+    print("VAE…"); with sess.as_default(): vae.fit(Xs,epochs=2,batch_size=32,verbose=1)
+    vae.save('vae_wadi.h5'); sess.close()
 
 def main():
     pretrain_vae()
     for LP,AL in [(200,1000),(200,5000),(200,10000)]:
-        print(f"=== LP={LP},AL={AL} ===")
+        print(f"LP={LP},AL={AL}")
         tf.compat.v1.reset_default_graph()
         sess=tf.compat.v1.Session()
-        from tensorflow.compat.v1.keras import backend as K2;K2.set_session(sess)
+        from tensorflow.compat.v1.keras import backend as K2; K2.set_session(sess)
         vae_model=load_model('vae_wadi.h5',custom_objects={'Sampling':Sampling},compile=False)
         env=EnvTimeSeriesWaDi(SENSOR_CSV,LABEL_CSV,N_STEPS)
         env.statefnc=RNNBinaryStateFuc
         env.rewardfnc=lambda ts,tc,a:RNNBinaryRewardFuc(ts,tc,a,vae_model,coef=20.0,include_vae=True)
-        ql=Q_Estimator_Nonlinear(lr=3e-4,scope='qlearn');qt=Q_Estimator_Nonlinear(lr=3e-4,scope='qtarget')
+        ql=Q_Estimator_Nonlinear(scope='qlearn'); qt=Q_Estimator_Nonlinear(scope='qtarget')
         L=len(env.timeseries_repo[0]); split_idx=int(L*VALIDATION_SEPARATE_RATIO)
-        exp_dir=f'exp_WaDi_LP{LP}_AL{AL}';os.makedirs(exp_dir,exist_ok=True)
-        # train + collect rewards/coefs (not returned here)
-        q_learning(env,sess,ql,qt,EPISODES,10,1000,1.0,0.1,50000,256,20.0,DISCOUNT_FACTOR,NUM_LABELPROPAGATION,NUM_ACTIVE_LEARNING)
-        # validate
-        val_dir=os.path.join(exp_dir,'validation')
-        f1,aupr=q_learning_validator(env,sess,ql,split_idx,val_dir,plot=True)
-        print(f"→ LP={LP},AL={AL}: F1={f1:.4f},AUPR={aupr:.4f}")
+        exp=f'exp_LP{LP}_AL{AL}'; os.makedirs(exp,exist_ok=True)
+        q_learning(env,sess,ql,qt,EPISODES,10,1000,1.0,0.1,50000,256,20.0,DISCOUNT_FACTOR,LP,AL)
+        save_plots(exp,[],[])  # you can collect rewards/coefs if desired
+        f1,aupr=q_learning_validator(env,sess,ql,split_idx,os.path.join(exp,'val'),plot=True)
+        print(f"→ F1={f1:.3f},AUPR={aupr:.3f}")
 
 if __name__=="__main__":
     main()
