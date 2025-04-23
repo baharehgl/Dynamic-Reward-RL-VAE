@@ -27,8 +27,8 @@ TN, TP, FP, FN            = 1, 10, -1, -10
 ACTION_SPACE_N            = 2
 VALIDATION_SEPARATE_RATIO = 0.8
 MAX_WARMUP_SAMPLES        = 10000
-NUM_LABELPROPAGATION      = 20
-NUM_ACTIVE_LEARNING       = 10
+NUM_LABELPROPAGATION      = 200   # LP = 200
+# NUM_ACTIVE_LEARNING will vary: [1000, 5000, 10000]
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 WA_DI_DIR  = os.path.join(BASE_DIR,'WaDi')
@@ -45,12 +45,13 @@ class Sampling(layers.Layer):
 
 def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
     inp       = layers.Input(shape=(original_dim,))
-    h1        = layers.Dense(intermediate_dim, activation='relu')(inp)
-    z_mean    = layers.Dense(latent_dim)(h1)
-    z_log_var = layers.Dense(latent_dim)(h1)
+    h         = layers.Dense(intermediate_dim, activation='relu')(inp)
+    z_mean    = layers.Dense(latent_dim)(h)
+    z_log_var = layers.Dense(latent_dim)(h)
     z_log_var = tf.clip_by_value(z_log_var,-10.0,10.0)
     z         = Sampling()([z_mean, z_log_var])
-    out       = layers.Dense(original_dim, activation='sigmoid')(layers.Dense(intermediate_dim, activation='relu')(z))
+    h_dec     = layers.Dense(intermediate_dim, activation='relu')(z)
+    out       = layers.Dense(original_dim, activation='sigmoid')(h_dec)
     vae       = models.Model(inp,out)
     recon     = losses.mse(inp,out)*original_dim
     kl        = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
@@ -80,11 +81,6 @@ def RNNBinaryRewardFuc(ts,c,action,vae_model=None,coef=1.0,include_vae=True):
     lbl = ts['label'].iat[c]
     return [TN+penalty,FP+penalty] if lbl==0 else [FN+penalty,TP+penalty]
 
-def RNNBinaryRewardFucTest(ts,c,action):
-    if c< N_STEPS: return [0,0]
-    lbl=ts['anomaly'].iat[c]
-    return [TN,FP] if lbl==0 else [FN,TP]
-
 # ── Q-Network ──────────────────────────────────────────────────────────────────
 class Q_Estimator_Nonlinear:
     def __init__(self,lr=3e-4,scope='q'):
@@ -110,9 +106,8 @@ def make_epsilon_greedy_policy(est,nA,sess):
     def policy_fn(obs,eps):
         A=np.ones(nA)*eps/nA
         q=est.predict([obs],sess)[0]
-        if len(q)==0:
-            return np.ones(nA)/nA
-        b=np.argmax(q); A[b]+=(1.0-eps)
+        b=0 if len(q)==0 else np.argmax(q)
+        A[b]+=(1.0-eps)
         return A
     return policy_fn
 
@@ -158,23 +153,23 @@ def q_learning(env,sess,ql,qt,
         for u in uncert:
             env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
 
-        # Active learning (reuse top uncertain)
+        # Active-Learning
         for u in uncert[:num_AL]:
             env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
 
         # rollout
         state, ep_r = env.reset(), 0
         while True:
-            eps = epsilons[min(ep, len(epsilons)-1)]
+            eps   = epsilons[min(ep, len(epsilons)-1)]
             probs = policy(state, eps)
             a     = safe_choice(probs)
-            nxt,r,done,_ = env.step(a)
-            ep_r += r[a]
+            nxt,r,done,_=env.step(a)
+            ep_r+= r[a]
             mem.append(T(state,r,nxt,done))
             if done: break
             state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-        # training
+        # train
         for _ in range(num_epoches):
             batch = random.sample(mem,batch_size)
             S,R,NS,D = map(np.array,zip(*batch))
@@ -197,8 +192,8 @@ def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
             if done: break
         preds,gts,vals=[],[],[]
         while True:
-            probs = policy(state,0)
-            a     = safe_argmax(probs)
+            probs=policy(state,0)
+            a    = safe_argmax(probs)
             preds.append(a)
             gts.append(env.timeseries['anomaly'].iat[env.timeseries_curser])
             vals.append(state[-1][0])
@@ -242,7 +237,7 @@ def pretrain_vae():
 
 def main():
     pretrain_vae()
-    for LP,AL in [(200,1000),(200,5000)]:
+    for AL in [1000,5000,10000]:
         tf.compat.v1.reset_default_graph()
         sess = tf.compat.v1.Session()
         from tensorflow.compat.v1.keras import backend as K2; K2.set_session(sess)
@@ -256,11 +251,12 @@ def main():
         qt = Q_Estimator_Nonlinear(scope='qtarget')
 
         split_idx = int(len(env.timeseries_repo[0])*VALIDATION_SEPARATE_RATIO)
-        q_learning(env,sess,ql,qt,EPISODES,5,500,1.0,0.1,10000,256,20.0,DISCOUNT_FACTOR,LP,AL)
+        q_learning(env,sess,ql,qt,EPISODES,5,500,1.0,0.1,10000,256,20.0,DISCOUNT_FACTOR,NUM_LABELPROPAGATION,AL)
 
-        val_dir = f'exp_LP{LP}_AL{AL}/validation'
+        exp_dir = f'exp_AL{AL}'
+        val_dir = os.path.join(exp_dir,'validation')
         f1,aupr = q_learning_validator(env,sess,ql,split_idx,val_dir,plot=True)
-        print(f"LP={LP},AL={AL}: F1={f1:.3f},AUPR={aupr:.3f}")
+        print(f"AL={AL}: F1={f1:.3f}, AUPR={aupr:.3f}")
 
 if __name__=="__main__":
     main()
