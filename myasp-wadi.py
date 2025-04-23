@@ -51,7 +51,7 @@ def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
     z_log_var = tf.clip_by_value(z_log_var,-10.0,10.0)
     z         = Sampling()([z_mean, z_log_var])
     out       = layers.Dense(original_dim, activation='sigmoid')(layers.Dense(intermediate_dim, activation='relu')(z))
-    vae       = models.Model(inp, out)
+    vae       = models.Model(inp,out)
     recon     = losses.mse(inp,out)*original_dim
     kl        = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
     vae.add_loss(tf.reduce_mean(recon+kl))
@@ -80,13 +80,18 @@ def RNNBinaryRewardFuc(ts,c,action,vae_model=None,coef=1.0,include_vae=True):
     lbl = ts['label'].iat[c]
     return [TN+penalty,FP+penalty] if lbl==0 else [FN+penalty,TP+penalty]
 
+def RNNBinaryRewardFucTest(ts,c,action):
+    if c< N_STEPS: return [0,0]
+    lbl=ts['anomaly'].iat[c]
+    return [TN,FP] if lbl==0 else [FN,TP]
+
 # ── Q-Network ──────────────────────────────────────────────────────────────────
 class Q_Estimator_Nonlinear:
     def __init__(self,lr=3e-4,scope='q'):
         self.scope=scope
         with tf.compat.v1.variable_scope(scope):
             self.state  = tf.compat.v1.placeholder(tf.float32,[None,N_STEPS,N_INPUT_DIM],name='state')
-            self.target = tf.compat.v1.placeholder(tf.float32,[None,ACTION_SPACE_N],   name='target')
+            self.target = tf.compat.v1.placeholder(tf.float32,[None,ACTION_SPACE_N],name='target')
             seq = tf.compat.v1.unstack(self.state,N_STEPS,axis=1)
             cell= tf.compat.v1.nn.rnn_cell.LSTMCell(N_HIDDEN_DIM)
             out,_= tf.compat.v1.nn.static_rnn(cell,seq,dtype=tf.float32)
@@ -105,9 +110,17 @@ def make_epsilon_greedy_policy(est,nA,sess):
     def policy_fn(obs,eps):
         A=np.ones(nA)*eps/nA
         q=est.predict([obs],sess)[0]
+        if len(q)==0:
+            return np.ones(nA)/nA
         b=np.argmax(q); A[b]+=(1.0-eps)
         return A
     return policy_fn
+
+def safe_argmax(probs):
+    return 0 if probs is None or len(probs)==0 else np.argmax(probs)
+
+def safe_choice(probs):
+    return 0 if probs is None or len(probs)==0 else np.random.choice(len(probs),p=probs)
 
 def copy_model_parameters(sess,src,dest):
     sv=tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,scope=src.scope)
@@ -128,48 +141,48 @@ def q_learning(env,sess,ql,qt,
     epsilons=np.linspace(eps_start,eps_end,eps_steps)
     policy=make_epsilon_greedy_policy(ql,ACTION_SPACE_N,sess)
 
-    # warm-up IsolationForest on first MAX_WARMUP_SAMPLES states
+    # warm-up
     env.reset()
-    states = [s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
-    X      = np.array([s[-1][0] for s in states]).reshape(-1,1)
+    data=[s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
+    X=np.array([s[-1][0] for s in data]).reshape(-1,1)
     IsolationForest(contamination=0.01).fit(X)
 
     for ep in range(num_episodes):
-        # LabelSpreading on FLATTENED states_list
-        arr = np.array(env.states_list)                    # (n,25,2)
-        flat = arr.reshape(arr.shape[0], -1)               # (n,50)
-        labels = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS, len(env.timeseries))])
-        lp_model = LabelSpreading(kernel='knn',n_neighbors=10)
-        lp_model.fit(flat, labels)
-        uncert = np.argsort(-np.max(lp_model.label_distributions_,axis=1))[:num_LP]
+        # LabelSpreading on flattened windows
+        arr   = np.array(env.states_list)                     # (n,25,2)
+        flat  = arr.reshape(arr.shape[0],-1)                   # (n,50)
+        labs  = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
+        lp    = LabelSpreading(kernel='knn',n_neighbors=10)
+        lp.fit(flat,labs)
+        uncert= np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
         for u in uncert:
-            env.timeseries['label'].iat[u+N_STEPS] = lp_model.transduction_[u]
+            env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
 
-        # Active learning
-        labeled = {i for i,v in enumerate(env.timeseries['label']) if v!=-1}
-        al = __import__('active_learning', fromlist=['active_learning']).active_learning if False else None
-        # simplest: just re-use LP picks as “active” for now
+        # Active learning (reuse top uncertain)
         for u in uncert[:num_AL]:
-            env.timeseries['label'].iat[u+N_STEPS] = env.timeseries['anomaly'].iat[u+N_STEPS]
+            env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
 
         # rollout
-        state = env.reset(); ep_r=0
+        state, ep_r = env.reset(), 0
         while True:
-            a = np.random.choice(ACTION_SPACE_N,p=policy(state,epsilons[0]))
+            eps = epsilons[min(ep, len(epsilons)-1)]
+            probs = policy(state, eps)
+            a     = safe_choice(probs)
             nxt,r,done,_ = env.step(a)
             ep_r += r[a]
             mem.append(T(state,r,nxt,done))
             if done: break
             state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-        # train
+        # training
         for _ in range(num_epoches):
             batch = random.sample(mem,batch_size)
             S,R,NS,D = map(np.array,zip(*batch))
             q0=qt.predict(NS[:,0],sess); q1=qt.predict(NS[:,1],sess)
             tgt = R + discount * np.stack((q0.max(1),q1.max(1)),axis=1)
             ql.update(S,tgt,sess)
-        copy_model_parameters(sess,ql,qt)
+        if ep % update_target_every==0:
+            copy_model_parameters(sess,ql,qt)
 
 # ── Validation ─────────────────────────────────────────────────────────────────
 def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
@@ -184,7 +197,8 @@ def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
             if done: break
         preds,gts,vals=[],[],[]
         while True:
-            a=np.argmax(policy(state,0))
+            probs = policy(state,0)
+            a     = safe_argmax(probs)
             preds.append(a)
             gts.append(env.timeseries['anomaly'].iat[env.timeseries_curser])
             vals.append(state[-1][0])
@@ -246,7 +260,7 @@ def main():
 
         val_dir = f'exp_LP{LP}_AL{AL}/validation'
         f1,aupr = q_learning_validator(env,sess,ql,split_idx,val_dir,plot=True)
-        print(f"Result LP={LP},AL={AL}: F1={f1:.3f},AUPR={aupr:.3f}")
+        print(f"LP={LP},AL={AL}: F1={f1:.3f},AUPR={aupr:.3f}")
 
 if __name__=="__main__":
     main()
