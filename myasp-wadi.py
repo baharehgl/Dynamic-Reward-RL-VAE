@@ -27,8 +27,7 @@ TN, TP, FP, FN            = 1, 10, -1, -10
 ACTION_SPACE_N            = 2
 VALIDATION_SEPARATE_RATIO = 0.8
 MAX_WARMUP_SAMPLES        = 10000
-NUM_LABELPROPAGATION      = 200   # LP = 200
-# NUM_ACTIVE_LEARNING will vary: [1000, 5000, 10000]
+NUM_LABELPROPAGATION      = 200   # number of LP windows per episode
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 WA_DI_DIR  = os.path.join(BASE_DIR,'WaDi')
@@ -81,6 +80,11 @@ def RNNBinaryRewardFuc(ts,c,action,vae_model=None,coef=1.0,include_vae=True):
     lbl = ts['label'].iat[c]
     return [TN+penalty,FP+penalty] if lbl==0 else [FN+penalty,TP+penalty]
 
+def RNNBinaryRewardFucTest(ts,c,action):
+    if c< N_STEPS: return [0,0]
+    lbl=ts['anomaly'].iat[c]
+    return [TN,FP] if lbl==0 else [FN,TP]
+
 # ── Q-Network ──────────────────────────────────────────────────────────────────
 class Q_Estimator_Nonlinear:
     def __init__(self,lr=3e-4,scope='q'):
@@ -106,8 +110,9 @@ def make_epsilon_greedy_policy(est,nA,sess):
     def policy_fn(obs,eps):
         A=np.ones(nA)*eps/nA
         q=est.predict([obs],sess)[0]
-        b=0 if len(q)==0 else np.argmax(q)
-        A[b]+=(1.0-eps)
+        if len(q)==0:
+            return np.ones(nA)/nA
+        b=np.argmax(q); A[b]+=(1.0-eps)
         return A
     return policy_fn
 
@@ -143,19 +148,21 @@ def q_learning(env,sess,ql,qt,
     IsolationForest(contamination=0.01).fit(X)
 
     for ep in range(num_episodes):
-        # LabelSpreading on flattened windows
-        arr   = np.array(env.states_list)                     # (n,25,2)
-        flat  = arr.reshape(arr.shape[0],-1)                   # (n,50)
-        labs  = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
-        lp    = LabelSpreading(kernel='knn',n_neighbors=10)
-        lp.fit(flat,labs)
-        uncert= np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
-        for u in uncert:
-            env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
+        # LabelSpreading only if there is at least one known label
+        labs = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
+        if np.any(labs != -1):
+            arr   = np.array(env.states_list)                   # (n,25,2)
+            flat  = arr.reshape(arr.shape[0],-1)                 # (n,50)
+            lp    = LabelSpreading(kernel='knn',n_neighbors=10)
+            lp.fit(flat, labs)
+            uncert= np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
+            for u in uncert:
+                env.timeseries['label'].iat[u+N_STEPS] = lp.transduction_[u]
 
-        # Active-Learning
-        for u in uncert[:num_AL]:
-            env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
+        # Active Learning on the same uncertain set
+        if 'uncert' in locals():
+            for u in uncert[:num_AL]:
+                env.timeseries['label'].iat[u+N_STEPS] = env.timeseries['anomaly'].iat[u+N_STEPS]
 
         # rollout
         state, ep_r = env.reset(), 0
@@ -169,7 +176,7 @@ def q_learning(env,sess,ql,qt,
             if done: break
             state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-        # train
+        # training
         for _ in range(num_epoches):
             batch = random.sample(mem,batch_size)
             S,R,NS,D = map(np.array,zip(*batch))
@@ -209,7 +216,7 @@ def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
             ax[0].plot(vals);ax[0].set_title('TS')
             ax[1].plot(preds,'g-');ax[1].set_title('Pred')
             ax[2].plot(gts,'r-');ax[2].set_title('GT')
-            ax[3].plot([aupr]*len(vals),'m-');ax[3].set_title('AU')
+            ax[3].plot([aupr]*len(vals),'m-');ax[3].set_title('AUPR')
             fig.savefig(os.path.join(record_dir,f'v{i+1}.png'));plt.close(fig)
     f.close()
     return np.mean(all_f1),np.mean(all_aupr)
@@ -237,7 +244,8 @@ def pretrain_vae():
 
 def main():
     pretrain_vae()
-    for AL in [1000,5000,10000]:
+
+    for AL in [1000, 5000, 10000]:
         tf.compat.v1.reset_default_graph()
         sess = tf.compat.v1.Session()
         from tensorflow.compat.v1.keras import backend as K2; K2.set_session(sess)
@@ -251,12 +259,18 @@ def main():
         qt = Q_Estimator_Nonlinear(scope='qtarget')
 
         split_idx = int(len(env.timeseries_repo[0])*VALIDATION_SEPARATE_RATIO)
-        q_learning(env,sess,ql,qt,EPISODES,5,500,1.0,0.1,10000,256,20.0,DISCOUNT_FACTOR,NUM_LABELPROPAGATION,AL)
+        q_learning(env,sess,ql,qt,
+                   num_episodes=EPISODES,
+                   num_epoches=5,
+                   update_target_every=500,
+                   eps_start=1.0, eps_end=0.1, eps_steps=10000,
+                   batch_size=256, coef=20.0, discount=DISCOUNT_FACTOR,
+                   num_LP=NUM_LABELPROPAGATION, num_AL=AL)
 
         exp_dir = f'exp_AL{AL}'
         val_dir = os.path.join(exp_dir,'validation')
         f1,aupr = q_learning_validator(env,sess,ql,split_idx,val_dir,plot=True)
-        print(f"AL={AL}: F1={f1:.3f}, AUPR={aupr:.3f}")
+        print(f"→ AL={AL}: F1={f1:.3f}, AUPR={aupr:.3f}")
 
 if __name__=="__main__":
     main()
