@@ -1,35 +1,38 @@
 import pandas as pd
 import numpy as np
-import os
 
+# Default state: sensor “value” at the cursor.
 def defaultStateFuc(timeseries, timeseries_curser, previous_state=None, action=None):
     return timeseries['value'][timeseries_curser]
 
+# Default reward: +1 if action matches anomaly flag, else -1.
 def defaultRewardFuc(timeseries, timeseries_curser, action):
     return 1 if action == timeseries['anomaly'][timeseries_curser] else -1
 
 class EnvTimeSeriesWaDi:
+    """
+    WaDi environment wrapper.
+    sensor_csv: path to WADI_14days_new.csv
+    label_csv : path to WADI_attackdataLABLE.csv
+    n_steps   : sliding window length
+    """
     def __init__(self, sensor_csv, label_csv, n_steps):
-        # 1) sensor
         df_sensor = pd.read_csv(sensor_csv)
+        # load label, skip first row so row2 becomes header
+        df_label = pd.read_csv(label_csv, header=1, low_memory=False)
+        raw      = df_label["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
+        # map 1→0 normal, -1→1 attack
+        labels   = np.where(raw == 1, 0, 1)
 
-        # 2) label — skip the first row, use second row as header
-        df_label    = pd.read_csv(label_csv, header=1, low_memory=False)
-        labels_raw  = df_label["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
-        # map 1->0 normal, -1->1 attack
-        labels      = np.where(labels_raw == 1, 0, 1)
-
-        # 3) align lengths
         L = min(len(df_sensor), len(labels))
-        vals   = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].values[:L]
+        vals   = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].astype(float).values[:L]
         labels = labels[:L]
 
-        # 4) build timeseries DataFrame
         ts = pd.DataFrame({
-            'value':   vals.astype(np.float32),
-            'anomaly': labels.astype(np.int32),
+            'value':   vals,
+            'anomaly': labels,
             'label':   np.full(L, -1, dtype=np.int32)
-        })
+        }).astype(np.float32)
 
         self.timeseries_repo        = [ts]
         self.timeseries_curser_init = n_steps
@@ -51,6 +54,7 @@ class EnvTimeSeriesWaDi:
                 s = self.statefnc(self.timeseries, c)
             else:
                 s = self.statefnc(self.timeseries, c, states[-1])
+                # for warm-up we only need one branch
                 if isinstance(s, np.ndarray) and s.ndim > 1:
                     s = s[0]
             states.append(s)
@@ -60,16 +64,15 @@ class EnvTimeSeriesWaDi:
         r = self.rewardfnc(self.timeseries, self.timeseries_curser, action)
         self.timeseries_curser += 1
         done = int(self.timeseries_curser >= len(self.timeseries))
-
         if done:
             state = np.array([self.timeseries_states, self.timeseries_states])
         else:
-            state = self.statefnc(self.timeseries, self.timeseries_curser,
-                                  self.timeseries_states, action)
-
+            state = self.statefnc(self.timeseries,
+                                  self.timeseries_curser,
+                                  self.timeseries_states,
+                                  action)
         if isinstance(state, np.ndarray) and state.ndim > np.array(self.timeseries_states).ndim:
             self.timeseries_states = state[action]
         else:
             self.timeseries_states = state
-
         return state, r, done, {}
