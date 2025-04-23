@@ -279,7 +279,8 @@ def pretrain_vae():
     X=np.array(W,dtype=np.float32)
     scaler=StandardScaler().fit(X);Xs=scaler.transform(X)
     vae=build_vae(N_STEPS)
-    print("VAE…"); with sess.as_default(): vae.fit(Xs,epochs=2,batch_size=32,verbose=1)
+    print("VAE training…")
+    with sess.as_default(): vae.fit(Xs,epochs=2,batch_size=32,verbose=1)
     vae.save('vae_wadi.h5'); sess.close()
 
 def main():
