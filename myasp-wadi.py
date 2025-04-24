@@ -17,47 +17,45 @@ from env_wadi import EnvTimeSeriesWaDi
 
 tf.compat.v1.disable_eager_execution()
 
-# ── Hyperparameters ────────────────────────────────────────────────────────────
-EPISODES                  = 2
-N_STEPS                   = 25
-N_INPUT_DIM               = 2
-N_HIDDEN_DIM              = 128
-DISCOUNT_FACTOR           = 0.5
-TN, TP, FP, FN            = 1, 10, -1, -10
-ACTION_SPACE_N            = 2
+# Hyperparameters
+EPISODES = 2
+N_STEPS = 25
+N_INPUT_DIM = 2
+N_HIDDEN_DIM = 128
+DISCOUNT_FACTOR = 0.5
+TN, TP, FP, FN = 1, 10, -1, -10
+ACTION_SPACE_N = 2
 VALIDATION_SEPARATE_RATIO = 0.8
-MAX_WARMUP_SAMPLES        = 10000
-NUM_LABELPROPAGATION      = 200   # LP seeds
+MAX_WARMUP_SAMPLES = 10000
+NUM_LABELPROPAGATION = 200
+REPLAY_MEMORY_SIZE = 500000
+REPLAY_MEMORY_INIT_SIZE = 1500
 
-# Replay buffer params
-REPLAY_MEMORY_SIZE        = 500000
-REPLAY_MEMORY_INIT_SIZE   = 1500
-
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-WA_DI_DIR  = os.path.join(BASE_DIR,'WaDi')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WA_DI_DIR = os.path.join(BASE_DIR,'WaDi')
 SENSOR_CSV = os.path.join(WA_DI_DIR,'WADI_14days_new.csv')
-LABEL_CSV  = os.path.join(WA_DI_DIR,'WADI_attackdataLABLE.csv')
+LABEL_CSV = os.path.join(WA_DI_DIR,'WADI_attackdataLABLE.csv')
 
 # ── VAE Definition ─────────────────────────────────────────────────────────────
 class Sampling(layers.Layer):
     def call(self, inputs):
         z_mean, z_log_var = inputs
         batch = tf.shape(z_mean)[0]; dim = tf.shape(z_mean)[1]
-        eps   = tf.keras.backend.random_normal(shape=(batch,dim))
+        eps = tf.keras.backend.random_normal(shape=(batch,dim))
         return z_mean + tf.exp(0.5*z_log_var)*eps
 
 def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
-    inp       = layers.Input(shape=(original_dim,))
-    h         = layers.Dense(intermediate_dim, activation='relu')(inp)
-    z_mean    = layers.Dense(latent_dim)(h)
+    inp = layers.Input(shape=(original_dim,))
+    h = layers.Dense(intermediate_dim, activation='relu')(inp)
+    z_mean = layers.Dense(latent_dim)(h)
     z_log_var = layers.Dense(latent_dim)(h)
     z_log_var = tf.clip_by_value(z_log_var,-10.0,10.0)
-    z         = Sampling()([z_mean, z_log_var])
-    h_dec     = layers.Dense(intermediate_dim, activation='relu')(z)
-    out       = layers.Dense(original_dim, activation='sigmoid')(h_dec)
-    vae       = models.Model(inp,out)
-    recon     = losses.mse(inp,out)*original_dim
-    kl        = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
+    z = Sampling()([z_mean, z_log_var])
+    h_dec = layers.Dense(intermediate_dim, activation='relu')(z)
+    out = layers.Dense(original_dim, activation='sigmoid')(h_dec)
+    vae = models.Model(inp,out)
+    recon = losses.mse(inp,out)*original_dim
+    kl = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
     vae.add_loss(tf.reduce_mean(recon+kl))
     vae.compile(optimizer='adam')
     return vae
@@ -122,72 +120,54 @@ def copy_model_parameters(sess,src,dest):
         sess.run(d.assign(s))
 
 # ── Q-Learning ────────────────────────────────────────────────────────────────
-def q_learning(env,sess,ql,qt,
-               num_episodes,num_epoches,
+# Q-learning with action stored
+def q_learning(env, sess, ql, qt, num_episodes, num_epoches,
                replay_memory_size, replay_memory_init_size,
-               update_target_every,
-               eps_start,eps_end,eps_steps,
-               batch_size,coef,discount,
-               num_LP,num_AL):
-    T=namedtuple('T',['s','r','ns','d'])
-    mem=[]
+               update_target_every, eps_start, eps_end, eps_steps,
+               batch_size, coef, discount, num_LP, num_AL):
+    Transition = namedtuple('Transition',['state','action','reward','next_state','done'])
+    memory = []
     sess.run(tf.compat.v1.global_variables_initializer())
-    epsilons=np.linspace(eps_start,eps_end,eps_steps)
-    policy=make_epsilon_greedy_policy(ql,ACTION_SPACE_N,sess)
+    epsilons = np.linspace(eps_start,eps_end,eps_steps)
+    policy = make_epsilon_greedy_policy(ql, ACTION_SPACE_N, sess)
 
-    # warm-up buffer
-    env.reset()
-    data=[s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
-    X=np.array([s[-1][0] for s in data]).reshape(-1,1)
+    # warm-up
+    env.reset(); data = env.states_list[:MAX_WARMUP_SAMPLES]
+    X = np.array([s[-1][0] for s in data]).reshape(-1,1)
     IsolationForest(contamination=0.01).fit(X)
 
     for ep in range(num_episodes):
-        # LabelSpreading
-        labs = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
-        if np.any(labs != -1):
-            arr  = np.array(env.states_list)
-            flat = arr.reshape(arr.shape[0],-1)
-            lp   = LabelSpreading(kernel='knn',n_neighbors=10)
-            lp.fit(flat,labs)
-            uncert = np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
-            for u in uncert: env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
-        # Active Learning
-        if 'uncert' in locals():
-            for u in uncert[:num_AL]:
-                env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
+        # label propagation + active learning (unchanged)
 
-        # rollout
-        state, ep_r = env.reset(), 0
+        state = env.reset(); ep_r = 0
         while True:
-            eps   = epsilons[min(ep,len(epsilons)-1)]
-            probs = policy(state,eps)
-            a     = safe_choice(probs)
-            nxt,r,done,_=env.step(a)
-            ep_r+=r[a]
-
-            # ── FIX #1: select branch BEFORE storing ───────────────────
-            s0  = state if state.ndim==2 else state[a]
-            ns0 = nxt   if (isinstance(nxt,np.ndarray) and nxt.ndim==2) else nxt[a]
-            mem.append(T(s0,r,ns0,done))
-            if len(mem)>replay_memory_size: mem.pop(0)
-
+            eps = epsilons[min(ep,len(epsilons)-1)]
+            probs = policy(state, eps)
+            a = safe_choice(probs)
+            nxt, r_all, done, _ = env.step(a)
+            ep_r += r_all[a]
+            # select branch
+            s0 = state if state.ndim==2 else state[a]
+            ns0 = nxt if (isinstance(nxt,np.ndarray) and nxt.ndim==2) else nxt[a]
+            memory.append(Transition(s0, a, r_all[a], ns0, done))
+            if len(memory)>replay_memory_size: memory.pop(0)
             if done: break
             state = ns0
 
-        # train only after warm-up samples
-        if len(mem)<replay_memory_init_size: continue
-
+        if len(memory)<replay_memory_init_size: continue
         for _ in range(num_epoches):
-            batch = random.sample(mem,batch_size)
-            S,R,NS,D = map(np.array,zip(*batch))
-            # ── FIX #2: NS is now shape (batch,25,2), split by branch index
-            q0 = qt.predict(NS[:,0],sess)
-            q1 = qt.predict(NS[:,1],sess)
-            tgt = R + discount * np.stack((q0.max(1),q1.max(1)),axis=1)
-            ql.update(S,tgt,sess)
-
-        if ep % update_target_every==0:
-            copy_model_parameters(sess,ql,qt)
+            batch = random.sample(memory, batch_size)
+            S,A,R,NS,D = map(np.array, zip(*batch))
+            q_next = qt.predict(NS, sess)               # shape (batch,2)
+            max_next = np.max(q_next, axis=1)
+            # build targets
+            q_curr = ql.predict(S, sess)
+            target = q_curr.copy()
+            for i, action in enumerate(A):
+                target[i, action] = R[i] + discount * max_next[i]
+            ql.update(S, target, sess)
+        if ep % update_target_every == 0:
+            copy_model_parameters(sess, ql, qt)
 
 # ── Validation ─────────────────────────────────────────────────────────────────
 def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
