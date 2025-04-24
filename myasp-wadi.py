@@ -18,7 +18,7 @@ from env_wadi import EnvTimeSeriesWaDi
 tf.compat.v1.disable_eager_execution()
 
 # Hyperparameters
-EPISODES                  = 2
+EPISODES                  = 100
 N_STEPS                   = 25
 N_INPUT_DIM               = 2
 N_HIDDEN_DIM              = 128
@@ -219,7 +219,7 @@ def pretrain_vae():
     X     = np.array(W,dtype=np.float32)
     Xs    = StandardScaler().fit_transform(X)
     vae   = build_vae(N_STEPS)
-    with sess.as_default(): vae.fit(Xs,epochs=2,batch_size=32,verbose=1)
+    with sess.as_default(): vae.fit(Xs,epochs=50,batch_size=32,verbose=1)
     vae.save('vae_wadi.h5'); sess.close()
 
 def main():
