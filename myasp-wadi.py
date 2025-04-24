@@ -29,7 +29,7 @@ VALIDATION_SEPARATE_RATIO = 0.8
 MAX_WARMUP_SAMPLES        = 10000
 NUM_LABELPROPAGATION      = 200   # LP seeds
 
-# Replay buffer params (introduced)
+# Replay buffer params
 REPLAY_MEMORY_SIZE        = 500000
 REPLAY_MEMORY_INIT_SIZE   = 1500
 
@@ -84,7 +84,7 @@ def RNNBinaryRewardFuc(ts,c,action,vae_model=None,coef=1.0,include_vae=True):
     lbl = ts['label'].iat[c]
     return [TN+penalty,FP+penalty] if lbl==0 else [FN+penalty,TP+penalty]
 
-# ── Q‑Network ──────────────────────────────────────────────────────────────────
+# ── Q-Network ──────────────────────────────────────────────────────────────────
 class Q_Estimator_Nonlinear:
     def __init__(self,lr=3e-4,scope='q'):
         self.scope=scope
@@ -113,7 +113,6 @@ def make_epsilon_greedy_policy(est,nA,sess):
         return A
     return policy_fn
 
-def safe_argmax(probs): return 0 if probs is None or len(probs)==0 else np.argmax(probs)
 def safe_choice(probs): return 0 if probs is None or len(probs)==0 else np.random.choice(len(probs),p=probs)
 
 def copy_model_parameters(sess,src,dest):
@@ -122,7 +121,7 @@ def copy_model_parameters(sess,src,dest):
     for s,d in zip(sorted(sv,key=lambda v:v.name), sorted(dv,key=lambda v:v.name)):
         sess.run(d.assign(s))
 
-# ── Q‑Learning ────────────────────────────────────────────────────────────────
+# ── Q-Learning ────────────────────────────────────────────────────────────────
 def q_learning(env,sess,ql,qt,
                num_episodes,num_epoches,
                replay_memory_size, replay_memory_init_size,
@@ -144,19 +143,20 @@ def q_learning(env,sess,ql,qt,
 
     for ep in range(num_episodes):
         # LabelSpreading
-        labs = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
+        labs = np.array([env.ts['label'].iat[i] for i in range(N_STEPS,len(env.ts))])
         if np.any(labs != -1):
             arr  = np.array(env.states_list)
             flat = arr.reshape(arr.shape[0],-1)
             lp   = LabelSpreading(kernel='knn',n_neighbors=10)
             lp.fit(flat,labs)
             uncert = np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
-            for u in uncert: env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
+            for u in uncert: env.ts['label'].iat[u+N_STEPS]=lp.transduction_[u]
         # Active Learning
         if 'uncert' in locals():
             for u in uncert[:num_AL]:
-                env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
+                env.ts['label'].iat[u+N_STEPS]=env.ts['anomaly'].iat[u+N_STEPS]
 
+        # rollout
         state, ep_r = env.reset(), 0
         while True:
             eps   = epsilons[min(ep,len(epsilons)-1)]
@@ -164,22 +164,30 @@ def q_learning(env,sess,ql,qt,
             a     = safe_choice(probs)
             nxt,r,done,_=env.step(a)
             ep_r+=r[a]
-            mem.append(T(state,r,nxt,done))
-            # enforce buffer size
-            if len(mem)>replay_memory_size: mem.pop(0)
-            if done: break
-            state = nxt[a] if (isinstance(nxt,np.ndarray) and nxt.ndim>2) else nxt
 
-        # only train after init size
-        if len(mem) < replay_memory_init_size: continue
+            # ── FIX #1: select branch BEFORE storing ───────────────────
+            s0  = state if state.ndim==2 else state[a]
+            ns0 = nxt   if (isinstance(nxt,np.ndarray) and nxt.ndim==2) else nxt[a]
+            mem.append(T(s0,r,ns0,done))
+            if len(mem)>replay_memory_size: mem.pop(0)
+
+            if done: break
+            state = ns0
+
+        # train only after warm-up samples
+        if len(mem)<replay_memory_init_size: continue
 
         for _ in range(num_epoches):
             batch = random.sample(mem,batch_size)
             S,R,NS,D = map(np.array,zip(*batch))
-            q0=qt.predict(NS[:,0],sess); q1=qt.predict(NS[:,1],sess)
+            # ── FIX #2: NS is now shape (batch,25,2), split by branch index
+            q0 = qt.predict(NS[:,0],sess)
+            q1 = qt.predict(NS[:,1],sess)
             tgt = R + discount * np.stack((q0.max(1),q1.max(1)),axis=1)
             ql.update(S,tgt,sess)
-        if ep % update_target_every==0: copy_model_parameters(sess,ql,qt)
+
+        if ep % update_target_every==0:
+            copy_model_parameters(sess,ql,qt)
 
 # ── Validation ─────────────────────────────────────────────────────────────────
 def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
