@@ -143,18 +143,18 @@ def q_learning(env,sess,ql,qt,
 
     for ep in range(num_episodes):
         # LabelSpreading
-        labs = np.array([env.ts['label'].iat[i] for i in range(N_STEPS,len(env.ts))])
+        labs = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
         if np.any(labs != -1):
             arr  = np.array(env.states_list)
             flat = arr.reshape(arr.shape[0],-1)
             lp   = LabelSpreading(kernel='knn',n_neighbors=10)
             lp.fit(flat,labs)
             uncert = np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
-            for u in uncert: env.ts['label'].iat[u+N_STEPS]=lp.transduction_[u]
+            for u in uncert: env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
         # Active Learning
         if 'uncert' in locals():
             for u in uncert[:num_AL]:
-                env.ts['label'].iat[u+N_STEPS]=env.ts['anomaly'].iat[u+N_STEPS]
+                env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
 
         # rollout
         state, ep_r = env.reset(), 0
