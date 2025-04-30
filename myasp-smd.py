@@ -29,8 +29,9 @@ from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 
-#os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
-print(os.environ["CUDA_VISIBLE_DEVICES"])
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+gpus = tf.config.list_physical_devices('GPU')
+print("GPUs detected by TensorFlow:", gpus)
 
 ############################
 # Macros and Hyperparameters.
@@ -293,7 +294,7 @@ class WarmUp(object):
 def q_learning(env, sess, qlearn_estimator, target_estimator, num_episodes, num_epoches,
                replay_memory_size=500000, replay_memory_init_size=50000, experiment_dir='./log/',
                update_target_estimator_every=10000, discount_factor=0.99,
-               epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=256,
+               epsilon_start=1.0, epsilon_end=0.1, epsilon_decay_steps=500000, batch_size=128,
                num_LabelPropagation=20, num_active_learning=10, test=0, vae_model=None, include_vae_penalty=True):
     Transition = namedtuple("Transition", ["state", "reward", "next_state", "done"])
     replay_memory = []
@@ -601,7 +602,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
                                                        epsilon_end=0.1,
                                                        epsilon_decay_steps=500000,
                                                        discount_factor=discount_factor,
-                                                       batch_size=256,
+                                                       batch_size=128,
                                                        num_LabelPropagation=num_LP,
                                                        num_active_learning=num_AL,
                                                        test=test,
