@@ -29,7 +29,7 @@ ACTION_SPACE_N     = 2
 VALIDATION_SPLIT   = 0.8
 MAX_VAE_SAMPLES    = 10000
 NUM_LP             = 200
-BATCH_SIZE         = 256
+BATCH_SIZE         = 128
 VAE_EPOCHS         = 50
 VAE_BATCH          = 32
 
