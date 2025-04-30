@@ -75,7 +75,7 @@ class VAE(nn.Module):
 
 vae      = VAE(input_dim, latent_dim).to(device)
 opt_vae  = optim.Adam(vae.parameters(), lr=1e-3)
-epochs   = 10; bs = 256
+epochs   = 2; bs = 256
 vae.train()
 for ep in range(epochs):
     perm, tot = np.random.permutation(len(X_val_s)), 0.0
@@ -143,7 +143,7 @@ class DQN:
             self.tgt.load_state_dict(self.net.state_dict())
 
 # ── Active Learning + Training ─────────────────────────────────────────────────
-budgets = [1000,5000,10000]; episodes = 10
+budgets = [1000,5000,10000]; episodes = 2
 for budget in budgets:
     os.makedirs(f"exp_AL{budget}",exist_ok=True)
     per_ep = budget // episodes
