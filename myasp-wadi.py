@@ -1,258 +1,316 @@
-# Adapted anomaly detection code for WaDi dataset (originally for SMD)
-# =========================================================
-
-# 1. Data Loading and Preprocessing
-# ---------------------------------------------------------
-import pandas as pd
+import os
+import random
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from collections import namedtuple
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import precision_recall_fscore_support, average_precision_score
+from sklearn.semi_supervised import LabelSpreading
+from sklearn.ensemble import IsolationForest
+from tensorflow.keras import layers, models, losses
+from tensorflow.keras.models import load_model
 
-# File paths for WaDi dataset
-train_path = 'WaDi/WADI_14days_new.csv'
-test_path = 'WaDi/WADI_attackdataLABLE.csv'
+from env_wadi import EnvTimeSeriesWaDi
 
-# Load training data (unlabeled sensor data)
-train_df = pd.read_csv(train_path)
-# Remove any label column if present (not expected in training data)
-if 'Attack LABLE' in train_df.columns:
-    train_df.drop(columns=['Attack LABLE'], inplace=True)
-# Remove non-sensor columns (e.g., timestamp)
-for col in list(train_df.columns):
-    if col.lower().startswith('time') or col.lower().startswith('date'):
-        train_df.drop(columns=[col], inplace=True)
+# disable eager so we can use tf.compat.v1.Session
+tf.compat.v1.disable_eager_execution()
 
-# Load test data (sensor data with attack labels)
-test_df = pd.read_csv(test_path)
-# Identify the label column (should contain 'label' in name)
-label_col = None
-for col in test_df.columns:
-    if 'Attack LABLE' in col.lower():
-        label_col = col
-        break
-if label_col is None:
-    raise ValueError("Label column not found in test dataset.")
-# Convert labels: 1 (no attack) -> 0 (normal), -1 (attack) -> 1 (anomaly)
-test_df[label_col] = test_df[label_col].apply(lambda x: 0 if x == 1 else 1)
-# Separate features and labels
-y_test = test_df[label_col].values
-X_test_df = test_df.drop(columns=[label_col])
-# Remove non-sensor columns from test data (e.g., timestamp)
-for col in list(X_test_df.columns):
-    if col.lower().startswith('time') or col.lower().startswith('date'):
-        X_test_df.drop(columns=[col], inplace=True)
-# Align test features with train features (same columns and order)
-X_test_df = X_test_df[train_df.columns]
+# ─── HYPERPARAMETERS ─────────────────────────────────────────────────────────────
+EPISODES                  = 2
+N_STEPS                   = 25
+DISCOUNT_FACTOR           = 0.5
+TN, TP, FP, FN            = 1, 10, -1, -10
+ACTION_SPACE_N            = 2
+VALIDATION_SEPARATE_RATIO = 0.8
+MAX_WARMUP_SAMPLES        = 10000
+NUM_LABELPROPAGATION      = 200
 
-# Convert features to numpy arrays
-X_train = train_df.values.astype(np.float32)
-X_test = X_test_df.values.astype(np.float32)
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+WA_DI_DIR  = os.path.join(BASE_DIR, 'WaDi')
+SENSOR_CSV = os.path.join(WA_DI_DIR, 'WADI_14days_new.csv')
+LABEL_CSV  = os.path.join(WA_DI_DIR, 'WADI_attackdataLABLE.csv')
 
-# Scale features (fit on train, apply to both train and test)
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+# ─── DISCOVER FEATURE COLUMNS ────────────────────────────────────────────────────
+# assume SENSOR_CSV has one header row listing all sensor features
+_sensor_df   = pd.read_csv(SENSOR_CSV, nrows=1)
+feature_cols = list(_sensor_df.columns)           # all sensor measurements
+n_features   = len(feature_cols)
+N_INPUT_DIM  = n_features + 1                     # plus action flag
 
-# 2. VAE Model Definition and Training
-# ---------------------------------------------------------
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+# ─── VARIATIONAL AUTOENCODER ─────────────────────────────────────────────────────
+class Sampling(layers.Layer):
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = tf.shape(z_mean)[0]
+        dim   = tf.shape(z_mean)[1]
+        eps   = tf.keras.backend.random_normal(shape=(batch, dim))
+        return z_mean + tf.exp(0.5 * z_log_var) * eps
 
-# Define Variational Autoencoder (VAE) for multivariate data
-class VAE(nn.Module):
-    def __init__(self, input_dim, latent_dim=10, hidden_dim=64):
-        super(VAE, self).__init__()
-        # Encoder
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        # Decoder
-        self.fc2 = nn.Linear(latent_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, input_dim)
-    def encode(self, x):
-        h = F.relu(self.fc1(x))
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
-        return mu, logvar
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std  # sample z
-    def decode(self, z):
-        h = F.relu(self.fc2(z))
-        return self.fc3(h)
-    def forward(self, x):
-        mu, logvar = self.encode(x)
-        z = self.reparameterize(mu, logvar)
-        recon_x = self.decode(z)
-        return recon_x, mu, logvar
+def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
+    inp       = layers.Input(shape=(original_dim,))
+    h         = layers.Dense(intermediate_dim, activation='relu')(inp)
+    z_mean    = layers.Dense(latent_dim)(h)
+    z_log_var = layers.Dense(latent_dim)(h)
+    z_log_var = tf.clip_by_value(z_log_var, -10.0, 10.0)
+    z         = Sampling()([z_mean, z_log_var])
+    h_dec     = layers.Dense(intermediate_dim, activation='relu')(z)
+    out       = layers.Dense(original_dim, activation='sigmoid')(h_dec)
 
-# Initialize VAE and optimizer
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-vae = VAE(input_dim=X_train.shape[1]).to(device)
-optimizer_vae = optim.Adam(vae.parameters(), lr=1e-3)
+    vae       = models.Model(inp, out)
+    recon     = losses.mse(inp, out) * original_dim
+    kl        = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
+    vae.add_loss(tf.reduce_mean(recon + kl))
+    vae.compile(optimizer='adam')
+    return vae
 
-# Train VAE on normal training data
-num_epochs = 10
-batch_size = 64
-X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
-train_loader = torch.utils.data.DataLoader(X_train_tensor, batch_size=batch_size, shuffle=True)
-vae.train()
-for epoch in range(num_epochs):
-    total_loss = 0.0
-    for batch in train_loader:
-        batch = batch.to(device)
-        optimizer_vae.zero_grad()
-        recon_batch, mu, logvar = vae(batch)
-        # VAE loss = reconstruction loss + KL divergence
-        recon_loss = F.mse_loss(recon_batch, batch, reduction='sum')
-        kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = recon_loss + kld_loss
-        loss.backward()
-        optimizer_vae.step()
-        total_loss += loss.item()
-    avg_loss = total_loss / len(X_train_scaled)
-    print(f"Epoch {epoch+1}/{num_epochs}, VAE Loss: {avg_loss:.4f}")
+# ─── STATE & REWARD FUNCTIONS ───────────────────────────────────────────────────
+def RNNBinaryStateFuc(ts, c, prev=None, action=None):
+    if c < N_STEPS:
+        return None
+    # get last N_STEPS sensor windows
+    window = ts[feature_cols].iloc[c-N_STEPS+1:c+1].values.astype(np.float32)  # (N_STEPS, n_features)
+    # append action bit to each time-step
+    a0 = np.concatenate([window, np.zeros((N_STEPS,1),dtype=np.float32)], axis=1)
+    a1 = np.concatenate([window, np.ones((N_STEPS,1), dtype=np.float32)], axis=1)
+    return np.stack([a0, a1], axis=0)  # shape (2, N_STEPS, N_INPUT_DIM)
 
-# 3. Feature Extraction on Test Data (Reconstruction Errors)
-# ---------------------------------------------------------
-vae.eval()
-X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
-recon_errors = []
-with torch.no_grad():
-    batch_size_test = 256
-    for i in range(0, X_test_tensor.shape[0], batch_size_test):
-        batch = X_test_tensor[i:i+batch_size_test]
-        recon_batch, mu, logvar = vae(batch)
-        # Compute MSE recon error for each sample
-        errors = F.mse_loss(recon_batch, batch, reduction='none').mean(dim=1)
-        recon_errors.append(errors.cpu().numpy())
-recon_errors = np.concatenate(recon_errors)  # array of reconstruction errors per test sample
+def RNNBinaryRewardFuc(ts, c, action, vae_model=None, coef=1.0, include_vae=True):
+    if c < N_STEPS:
+        return [0, 0]
+    penalty = 0.0
+    if include_vae and vae_model is not None:
+        win = ts[feature_cols].iloc[c-N_STEPS+1:c+1].values.astype(np.float32)
+        win_flat = win.flatten().reshape(1, -1)
+        recon    = vae_model.predict(win_flat)
+        penalty  = coef * np.mean((recon - win_flat) ** 2)
+    lbl = ts['label'].iat[c]
+    return [TN + penalty, FP + penalty] if lbl == 0 else [FN + penalty, TP + penalty]
 
-# 4. Reinforcement Learning Environment and Agent Setup
-# ---------------------------------------------------------
-# Define anomaly detection environment for RL
-class AnomalyEnv:
-    def __init__(self, errors, labels):
-        self.errors = errors
-        self.labels = labels.astype(int)
-        self.n = len(errors)
-        self.index = 0
-    def reset(self):
-        self.index = 0
-        return None if self.n == 0 else float(self.errors[self.index])
-    def step(self, action):
-        # action: 0 = predict normal, 1 = predict anomaly
-        actual = self.labels[self.index]
-        # Dynamic reward: +1 for TP, 0 for TN, -1 for FP, -1 for FN
-        if action == 1:  # flagged as anomaly
-            reward = 1.0 if actual == 1 else -1.0
-        else:  # predicted normal
-            reward = -1.0 if actual == 1 else 0.0
-        # move to next time step
-        self.index += 1
-        done = (self.index >= self.n)
-        next_state = float(self.errors[self.index]) if not done else None
-        return next_state, reward, done
+def RNNBinaryRewardFucTest(ts, c, action):
+    if c < N_STEPS:
+        return [0, 0]
+    lbl = ts['anomaly'].iat[c]
+    return [TN, FP] if lbl == 0 else [FN, TP]
 
-# Define Q-network for RL agent (inputs state=error, outputs Q for two actions)
-class QNetwork(nn.Module):
-    def __init__(self, state_dim=1, action_dim=2, hidden_dim=16):
-        super(QNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, action_dim)
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+# ─── Q-NETWORK ───────────────────────────────────────────────────────────────────
+class Q_Estimator_Nonlinear:
+    def __init__(self, lr=3e-4, scope='q'):
+        self.scope = scope
+        with tf.compat.v1.variable_scope(scope):
+            self.state  = tf.compat.v1.placeholder(tf.float32, [None, N_STEPS, N_INPUT_DIM], name='state')
+            self.target = tf.compat.v1.placeholder(tf.float32, [None, ACTION_SPACE_N],    name='target')
+            seq = tf.compat.v1.unstack(self.state, N_STEPS, axis=1)
+            cell = tf.compat.v1.nn.rnn_cell.LSTMCell(N_HIDDEN_DIM)
+            out, _ = tf.compat.v1.nn.static_rnn(cell, seq, dtype=tf.float32)
+            self.logits   = layers.Dense(ACTION_SPACE_N)(out[-1])
+            self.loss     = tf.reduce_mean(tf.square(self.logits - self.target))
+            self.train_op = tf.compat.v1.train.AdamOptimizer(lr).minimize(self.loss)
 
-# Initialize environment and Q-network
-env = AnomalyEnv(recon_errors, y_test)
-q_net = QNetwork().to(device)
-optimizer_q = optim.Adam(q_net.parameters(), lr=1e-3)
+    def predict(self, state, sess):
+        return sess.run(self.logits, {self.state: state})
 
-# 5. Reinforcement Learning Training (Q-learning with experience replay)
-# ---------------------------------------------------------
-gamma = 0.99
-num_episodes = 20
-epsilon_start = 1.0
-epsilon_end = 0.1
-epsilon_decay = (epsilon_start - epsilon_end) / num_episodes
-memory = deque(maxlen=10000)
-batch_size_rl = 32
+    def update(self, state, target, sess):
+        sess.run(self.train_op, {self.state: state, self.target: target})
 
-for episode in range(num_episodes):
-    state_val = env.reset()
-    total_reward = 0.0
-    # Decay epsilon linearly over episodes
-    epsilon = max(epsilon_end, epsilon_start - episode * epsilon_decay)
-    done = False
-    while not done and state_val is not None:
-        # Epsilon-greedy action selection
-        if random.random() < epsilon:
-            action = random.randint(0, 1)
-        else:
-            state_tensor = torch.tensor([[state_val]], dtype=torch.float32).to(device)
-            with torch.no_grad():
-                q_values = q_net(state_tensor)
-                action = int(torch.argmax(q_values).item())
-        # Take action and observe reward
-        next_state_val, reward, done = env.step(action)
-        total_reward += reward
-        # Store transition in replay memory
-        memory.append((state_val, action, reward, next_state_val, done))
-        # Update current state
-        state_val = next_state_val
-        # Train Q-network on a random batch from memory (experience replay)
-        if len(memory) >= batch_size_rl:
-            batch = random.sample(memory, batch_size_rl)
-            # Prepare batch data
-            state_batch = torch.tensor([[b[0]] for b in batch], dtype=torch.float32).to(device)
-            action_batch = torch.tensor([b[1] for b in batch], dtype=torch.int64).to(device)
-            reward_batch = torch.tensor([b[2] for b in batch], dtype=torch.float32).to(device)
-            next_state_batch = [b[3] for b in batch]
-            done_batch = [b[4] for b in batch]
-            # Compute current Q values for each state-action pair
-            q_values = q_net(state_batch)
-            curr_q = q_values.gather(1, action_batch.unsqueeze(1)).squeeze(1)
-            # Compute target Q values
-            target_q = torch.zeros(batch_size_rl, dtype=torch.float32).to(device)
-            for i in range(batch_size_rl):
-                if done_batch[i] or next_state_batch[i] is None:
-                    target_q[i] = reward_batch[i]
-                else:
-                    ns_tensor = torch.tensor([[next_state_batch[i]]], dtype=torch.float32).to(device)
-                    with torch.no_grad():
-                        next_q_val = q_net(ns_tensor).max().item()
-                    target_q[i] = reward_batch[i] + gamma * next_q_val
-            # Update Q-network
-            loss_q = F.mse_loss(curr_q, target_q)
-            optimizer_q.zero_grad()
-            loss_q.backward()
-            optimizer_q.step()
-    print(f"Episode {episode+1}/{num_episodes} - Total Reward: {total_reward:.2f}, Epsilon: {epsilon:.2f}")
+# ─── POLICY & UTILITIES ─────────────────────────────────────────────────────────
+def make_epsilon_greedy_policy(estimator, nA, sess):
+    def policy_fn(obs, eps):
+        A = np.ones(nA) * eps / nA
+        q = estimator.predict([obs], sess)[0]
+        b = np.argmax(q)
+        A[b] += (1.0 - eps)
+        return A
+    return policy_fn
 
-# 6. Evaluation of the Trained Model
-# ---------------------------------------------------------
-env.reset()
-predictions = []
-for err in env.errors:
-    state_tensor = torch.tensor([[err]], dtype=torch.float32).to(device)
-    with torch.no_grad():
-        q_values = q_net(state_tensor)
-        action = int(torch.argmax(q_values).item())
-    predictions.append(action)
-predictions = np.array(predictions)
-actual = env.labels
+def safe_argmax(probs):
+    return 0 if probs is None or len(probs)==0 else np.argmax(probs)
 
-# Calculate metrics
-TP = np.sum((predictions == 1) & (actual == 1))
-FP = np.sum((predictions == 1) & (actual == 0))
-FN = np.sum((predictions == 0) & (actual == 1))
-TN = np.sum((predictions == 0) & (actual == 0))
-precision = TP / (TP + FP + 1e-6)
-recall = TP / (TP + FN + 1e-6)
-f1 = 2 * precision * recall / (precision + recall + 1e-6)
-print("Final Evaluation on Test Data:")
-print(f"TP: {TP}, FP: {FP}, FN: {FN}, TN: {TN}")
-print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}")
+def safe_choice(probs):
+    return 0 if probs is None or len(probs)==0 else np.random.choice(len(probs), p=probs)
+
+def copy_model_parameters(sess, src, dest):
+    sv = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope=src.scope)
+    dv = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES, scope=dest.scope)
+    for s_var, d_var in zip(sorted(sv, key=lambda v: v.name), sorted(dv, key=lambda v: v.name)):
+        sess.run(d_var.assign(s_var))
+
+# ─── Q-LEARNING ─────────────────────────────────────────────────────────────────
+def q_learning(env, sess, ql, qt,
+               num_episodes, num_epochs,
+               update_target_every,
+               eps_start, eps_end, eps_steps,
+               batch_size,
+               coef, discount,
+               num_LP, num_AL):
+    T   = namedtuple('T', ['s','r','ns','d'])
+    mem = []
+    sess.run(tf.compat.v1.global_variables_initializer())
+    epsilons = np.linspace(eps_start, eps_end, eps_steps)
+    policy   = make_epsilon_greedy_policy(ql, ACTION_SPACE_N, sess)
+
+    # ── Warm-up: train an IsolationForest on normal windows ─────────────
+    windows = []
+    # env.reset() populates env.timeseries
+    env.reset()
+    for i in range(N_STEPS, len(env.timeseries)):
+        if env.timeseries['label'].iat[i] == 0:
+            w = env.timeseries[feature_cols].iloc[i-N_STEPS+1:i+1].values.flatten()
+            windows.append(w)
+    if windows:
+        wf = np.array(windows[:MAX_WARMUP_SAMPLES], dtype=np.float32)
+        IsolationForest(contamination=0.01).fit(wf)
+
+    # ── Main RL loop ───────────────────────────────────────────────────────
+    for ep in range(num_episodes):
+        # Label Spreading
+        labs = np.array(env.timeseries['label'].iloc[N_STEPS:])
+        if np.any(labs != -1):
+            arr  = np.array([state for state in env.states_list if state is not None])
+            flat = arr.reshape(arr.shape[0], -1)
+            lp   = LabelSpreading(kernel='knn', n_neighbors=10)
+            lp.fit(flat, labs)
+            uncert = np.argsort(-np.max(lp.label_distributions_, axis=1))[:num_LP]
+            for u in uncert:
+                env.timeseries['label'].iat[u + N_STEPS] = lp.transduction_[u]
+
+        # Active Learning
+        if 'uncert' in locals():
+            for u in uncert[:num_AL]:
+                env.timeseries['label'].iat[u + N_STEPS] = env.timeseries['anomaly'].iat[u + N_STEPS]
+
+        # rollout
+        state, ep_r = env.reset(), 0
+        while True:
+            eps   = epsilons[min(ep, len(epsilons)-1)]
+            probs = policy(state, eps)
+            a     = safe_choice(probs)
+            raw, r, done, _ = env.step(a)
+            state = raw[a] if (isinstance(raw, np.ndarray) and raw.ndim>2) else raw
+            ep_r += r[a]
+            mem.append(T(state, r, raw, done))
+            if done:
+                break
+
+        # train on minibatches
+        for _ in range(num_epochs):
+            batch = random.sample(mem, batch_size)
+            S, R, NS, D = map(np.array, zip(*batch))
+            # compute targets
+            q0 = qt.predict(NS[:,0], sess)
+            q1 = qt.predict(NS[:,1], sess)
+            tgt = R + discount * np.stack((q0.max(1), q1.max(1)), axis=1)
+            ql.update(S, tgt, sess)
+
+        # periodically update target network
+        if ep % update_target_every == 0:
+            copy_model_parameters(sess, ql, qt)
+
+# ─── VALIDATION ────────────────────────────────────────────────────────────────
+def q_learning_validator(env, sess, trained, split_idx, record_dir, plot=True):
+    os.makedirs(record_dir, exist_ok=True)
+    with open(os.path.join(record_dir,'perf.txt'),'w') as f:
+        all_f1, all_aupr = [], []
+        for i in range(EPISODES):
+            policy = make_epsilon_greedy_policy(trained, ACTION_SPACE_N, sess)
+            state  = env.reset()
+            # skip training portion
+            while env.timeseries_curser < split_idx:
+                raw, _, done, _ = env.step(0)
+                state = raw[0] if (isinstance(raw,np.ndarray) and raw.ndim>2) else raw
+                if done: break
+
+            preds, gts, vals = [], [], []
+            while True:
+                probs = policy(state, 0.0)
+                a     = safe_argmax(probs)
+                preds.append(a)
+                gts.append(env.timeseries['anomaly'].iat[env.timeseries_curser])
+                vals.append(state[-1][0])
+                raw, _, done, _ = env.step(a)
+                state = raw[a] if (isinstance(raw,np.ndarray) and raw.ndim>2) else raw
+                if done: break
+
+            p, r, f1, _ = precision_recall_fscore_support(gts, preds, average='binary', zero_division=0)
+            aupr         = average_precision_score(gts, preds)
+            f.write(f"E{i+1}:P={p:.3f},R={r:.3f},F1={f1:.3f},AUPR={aupr:.3f}\n")
+            all_f1.append(f1); all_aupr.append(aupr)
+
+            if plot:
+                fig, ax = plt.subplots(4,1,sharex=True)
+                ax[0].plot(vals);        ax[0].set_title('Sensor Value')
+                ax[1].plot(preds,'g-');  ax[1].set_title('Prediction')
+                ax[2].plot(gts,'r-');    ax[2].set_title('Ground Truth')
+                ax[3].plot([aupr]*len(vals)); ax[3].set_title('AUPR')
+                fig.savefig(os.path.join(record_dir, f'v{i+1}.png'))
+                plt.close(fig)
+
+    return np.mean(all_f1), np.mean(all_aupr)
+
+# ─── PRETRAIN VAE ───────────────────────────────────────────────────────────────
+def pretrain_vae():
+    tf.compat.v1.reset_default_graph()
+    from tensorflow.compat.v1.keras import backend as K
+    sess = tf.compat.v1.Session()
+    K.set_session(sess)
+
+    df_raw = pd.read_csv(SENSOR_CSV)
+    raw_lbl= pd.read_csv(LABEL_CSV, header=1, low_memory=False)["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
+    labels = np.where(raw_lbl==1, 0, 1)
+    L      = min(len(df_raw), len(labels))
+
+    # build windows of normal data
+    W = []
+    for i in range(N_STEPS, L):
+        if labels[i] == 0:
+            win = df_raw[feature_cols].iloc[i-N_STEPS+1:i+1].values
+            W.append(win.flatten())
+    X  = np.array(W, dtype=np.float32)
+    Xs = StandardScaler().fit_transform(X)
+
+    vae = build_vae(original_dim=N_STEPS * n_features)
+    vae.fit(Xs, epochs=2, batch_size=32, verbose=1)
+    vae.save('vae_wadi.h5')
+    sess.close()
+
+# ─── MAIN ───────────────────────────────────────────────────────────────────────
+def main():
+    pretrain_vae()
+    for AL in [1000, 5000, 10000]:
+        tf.compat.v1.reset_default_graph()
+        sess = tf.compat.v1.Session()
+        from tensorflow.compat.v1.keras import backend as K2
+        K2.set_session(sess)
+
+        vae_model = load_model('vae_wadi.h5', custom_objects={'Sampling': Sampling}, compile=False)
+        env       = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
+        env.statefnc  = RNNBinaryStateFuc
+        env.rewardfnc = lambda ts,tc,a: RNNBinaryRewardFuc(ts,tc,a,vae_model,coef=20.0,include_vae=True)
+
+        ql = Q_Estimator_Nonlinear(scope='qlearn')
+        qt = Q_Estimator_Nonlinear(scope='qtarget')
+        split_idx = int(len(env.timeseries_repo[0]) * VALIDATION_SEPARATE_RATIO)
+
+        q_learning(env, sess, ql, qt,
+                   num_episodes=EPISODES,
+                   num_epochs=5,
+                   update_target_every=1,
+                   eps_start=1.0,
+                   eps_end=0.1,
+                   eps_steps=10000,
+                   batch_size=128,
+                   coef=20.0,
+                   discount=DISCOUNT_FACTOR,
+                   num_LP=NUM_LABELPROPAGATION,
+                   num_AL=AL)
+
+        exp_dir = f'exp_AL{AL}'
+        val_dir = os.path.join(exp_dir, 'validation')
+        f1, aupr = q_learning_validator(env, sess, ql, split_idx, val_dir, plot=True)
+        print(f"AL={AL}: F1={f1:.3f}, AUPR={aupr:.3f}")
+
+if __name__ == "__main__":
+    main()
