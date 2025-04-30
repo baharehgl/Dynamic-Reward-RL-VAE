@@ -21,6 +21,10 @@ from collections import namedtuple
 # your custom WADI environment
 from env_wadi import EnvTimeSeriesWaDi
 
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+gpus = tf.config.list_physical_devices('GPU')
+print("GPUs detected by TensorFlow:", gpus)
+
 # ─── HYPERPARAMETERS & PATHS ────────────────────────────────────────────────────
 EPISODES = 2
 N_STEPS = 25
