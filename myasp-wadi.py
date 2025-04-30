@@ -26,7 +26,7 @@ test_df = pd.read_csv(test_path)
 # Identify the label column (should contain 'label' in name)
 label_col = None
 for col in test_df.columns:
-    if 'label' in col.lower():
+    if 'Attack LABLE' in col.lower():
         label_col = col
         break
 if label_col is None:
