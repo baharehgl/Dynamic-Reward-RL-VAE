@@ -1,198 +1,258 @@
-import os
-import random
-import numpy as np
+# Adapted anomaly detection code for WaDi dataset (originally for SMD)
+# =========================================================
+
+# 1. Data Loading and Preprocessing
+# ---------------------------------------------------------
 import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+
+# File paths for WaDi dataset
+train_path = 'WaDi/WADI_14days_new.csv'
+test_path = 'WaDi/WADI_attackdataLABLE.csv'
+
+# Load training data (unlabeled sensor data)
+train_df = pd.read_csv(train_path)
+# Remove any label column if present (not expected in training data)
+if 'Attack LABLE' in train_df.columns:
+    train_df.drop(columns=['Attack LABLE'], inplace=True)
+# Remove non-sensor columns (e.g., timestamp)
+for col in list(train_df.columns):
+    if col.lower().startswith('time') or col.lower().startswith('date'):
+        train_df.drop(columns=[col], inplace=True)
+
+# Load test data (sensor data with attack labels)
+test_df = pd.read_csv(test_path)
+# Identify the label column (should contain 'label' in name)
+label_col = None
+for col in test_df.columns:
+    if 'label' in col.lower():
+        label_col = col
+        break
+if label_col is None:
+    raise ValueError("Label column not found in test dataset.")
+# Convert labels: 1 (no attack) -> 0 (normal), -1 (attack) -> 1 (anomaly)
+test_df[label_col] = test_df[label_col].apply(lambda x: 0 if x == 1 else 1)
+# Separate features and labels
+y_test = test_df[label_col].values
+X_test_df = test_df.drop(columns=[label_col])
+# Remove non-sensor columns from test data (e.g., timestamp)
+for col in list(X_test_df.columns):
+    if col.lower().startswith('time') or col.lower().startswith('date'):
+        X_test_df.drop(columns=[col], inplace=True)
+# Align test features with train features (same columns and order)
+X_test_df = X_test_df[train_df.columns]
+
+# Convert features to numpy arrays
+X_train = train_df.values.astype(np.float32)
+X_test = X_test_df.values.astype(np.float32)
+
+# Scale features (fit on train, apply to both train and test)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# 2. VAE Model Definition and Training
+# ---------------------------------------------------------
 import torch
-from torch import nn, optim
-from sklearn.metrics import precision_recall_curve, average_precision_score, f1_score
-import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 
-# ── Reproducibility ─────────────────────────────────────────────────────────────
-seed = 0
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(seed)
-
-# ── Paths ────────────────────────────────────────────────────────────────────────
-data_dir       = "WaDi"
-features_file  = os.path.join(data_dir, "WADI_14days_new.csv")
-labels_file    = os.path.join(data_dir, "WADI_attackdataLABLE.csv")
-
-# ── Load & Preprocess ───────────────────────────────────────────────────────────
-df_feat = pd.read_csv(features_file)
-df_lbl  = pd.read_csv(labels_file, header=1, low_memory=False)["Attack LABLE (1:No Attack, -1:Attack)"]
-y_all   = np.where(df_lbl.values == 1, 0, 1)  # 0=normal, 1=anomaly
-
-# keep only numeric, non-constant columns
-df_feat = df_feat.select_dtypes(include=[np.number])
-df_feat = df_feat.loc[:, df_feat.std() > 0.0]
-
-# fill NaNs
-df_feat.fillna(df_feat.mean(), inplace=True)
-X_all = df_feat.values.astype(np.float32)
-
-# ── 80/20 Split ─────────────────────────────────────────────────────────────────
-n = len(X_all)
-split_idx = int(n * 0.8)
-X_val     = X_all[:split_idx]
-y_val     = y_all[:split_idx]
-X_hold    = X_all[split_idx:]
-y_hold    = y_all[split_idx:]
-
-# ── MinMax Scaling based on val set ──────────────────────────────────────────────
-min_v = X_val.min(axis=0)
-max_v = X_val.max(axis=0)
-rng   = np.where(max_v - min_v == 0, 1.0, max_v - min_v)
-X_val_s  = (X_val  - min_v) / rng
-X_hold_s = (X_hold - min_v) / rng
-
-# ── VAE Definition ──────────────────────────────────────────────────────────────
-device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-input_dim  = X_val_s.shape[1]
-latent_dim = 5
-
+# Define Variational Autoencoder (VAE) for multivariate data
 class VAE(nn.Module):
-    def __init__(self, D, L, H=64):
-        super().__init__()
-        self.enc1 = nn.Linear(D,H); self.enc2 = nn.Linear(H,H//2)
-        self.mu   = nn.Linear(H//2, L); self.logv = nn.Linear(H//2, L)
-        self.dec1 = nn.Linear(L, H//2); self.dec2 = nn.Linear(H//2,H)
-        self.out  = nn.Linear(H, D); self.relu = nn.ReLU()
-    def encode(self,x):
-        h = self.relu(self.enc1(x)); h = self.relu(self.enc2(h))
-        return self.mu(h), self.logv(h)
-    def reparam(self,m,lv):
-        std = torch.exp(0.5*lv); eps = torch.randn_like(std)
-        return m + eps*std
-    def decode(self,z):
-        h = self.relu(self.dec1(z)); h = self.relu(self.dec2(h))
-        return self.out(h)
-    def forward(self,x):
-        m,lv = self.encode(x); z=self.reparam(m,lv)
-        return self.decode(z), m, lv
+    def __init__(self, input_dim, latent_dim=10, hidden_dim=64):
+        super(VAE, self).__init__()
+        # Encoder
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        # Decoder
+        self.fc2 = nn.Linear(latent_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, input_dim)
+    def encode(self, x):
+        h = F.relu(self.fc1(x))
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std  # sample z
+    def decode(self, z):
+        h = F.relu(self.fc2(z))
+        return self.fc3(h)
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        recon_x = self.decode(z)
+        return recon_x, mu, logvar
 
-vae      = VAE(input_dim, latent_dim).to(device)
-opt_vae  = optim.Adam(vae.parameters(), lr=1e-3)
-epochs   = 2; bs = 256
+# Initialize VAE and optimizer
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+vae = VAE(input_dim=X_train.shape[1]).to(device)
+optimizer_vae = optim.Adam(vae.parameters(), lr=1e-3)
+
+# Train VAE on normal training data
+num_epochs = 10
+batch_size = 64
+X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+train_loader = torch.utils.data.DataLoader(X_train_tensor, batch_size=batch_size, shuffle=True)
 vae.train()
-for ep in range(epochs):
-    perm, tot = np.random.permutation(len(X_val_s)), 0.0
-    for i in range(0, len(X_val_s), bs):
-        batch = torch.tensor(X_val_s[perm[i:i+bs]],device=device)
-        opt_vae.zero_grad()
-        recon, m, lv = vae(batch)
-        mse = nn.functional.mse_loss(recon, batch, reduction="sum")
-        kl  = -0.5*torch.sum(1+lv - m.pow(2) - lv.exp())
-        loss = mse + kl; loss.backward(); opt_vae.step()
-        tot += loss.item()
-    print(f"VAE Ep{ep+1}/{epochs} avg loss {tot/len(X_val_s):.4f}")
+for epoch in range(num_epochs):
+    total_loss = 0.0
+    for batch in train_loader:
+        batch = batch.to(device)
+        optimizer_vae.zero_grad()
+        recon_batch, mu, logvar = vae(batch)
+        # VAE loss = reconstruction loss + KL divergence
+        recon_loss = F.mse_loss(recon_batch, batch, reduction='sum')
+        kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        loss = recon_loss + kld_loss
+        loss.backward()
+        optimizer_vae.step()
+        total_loss += loss.item()
+    avg_loss = total_loss / len(X_train_scaled)
+    print(f"Epoch {epoch+1}/{num_epochs}, VAE Loss: {avg_loss:.4f}")
+
+# 3. Feature Extraction on Test Data (Reconstruction Errors)
+# ---------------------------------------------------------
 vae.eval()
-
-# ── Latent & Recon Errors ────────────────────────────────────────────────────────
+X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
+recon_errors = []
 with torch.no_grad():
-    tv    = torch.tensor(X_val_s,device=device)
-    rv, mv, lv_ = vae(tv)
-    z_val    = mv.cpu().numpy()
-    err_val  = np.mean((rv.cpu().numpy() - X_val_s)**2, axis=1)
-    th99     = np.percentile(err_val,99)
-    ths     = torch.tensor(X_hold_s,device=device)
-    rh, mh, lh = vae(ths)
-    z_hold   = mh.cpu().numpy()
-    err_hold = np.mean((rh.cpu().numpy() - X_hold_s)**2, axis=1)
+    batch_size_test = 256
+    for i in range(0, X_test_tensor.shape[0], batch_size_test):
+        batch = X_test_tensor[i:i+batch_size_test]
+        recon_batch, mu, logvar = vae(batch)
+        # Compute MSE recon error for each sample
+        errors = F.mse_loss(recon_batch, batch, reduction='none').mean(dim=1)
+        recon_errors.append(errors.cpu().numpy())
+recon_errors = np.concatenate(recon_errors)  # array of reconstruction errors per test sample
 
-# ── DQN Agent ────────────────────────────────────────────────────────────────────
-class DQN:
-    def __init__(self,S,A=2,H=64,lr=1e-3,γ=0.99):
-        self.net = nn.Sequential(nn.Linear(S,H),nn.ReLU(),
-                                  nn.Linear(H,H),nn.ReLU(),
-                                  nn.Linear(H,A)).to(device)
-        self.tgt = nn.Sequential(*[l for l in self.net]).to(device)
-        self.tgt.load_state_dict(self.net.state_dict())
-        self.opt  = optim.Adam(self.net.parameters(), lr=lr)
-        self.γ     = γ; self.eps=1.0; self.eps_end=0.1; self.eps_dec=1e-3
-        self.mem   = []; self.mem_cap=50000; self.steps=0
-    def act(self,s):
-        if random.random()<self.eps:
-            return random.randrange(2)
-        with torch.no_grad():
-            q = self.net(torch.tensor(s,device=device).float().unsqueeze(0))
-            return int(q.argmax().cpu())
-    def store(self,s,a,r,ns,d):
-        if len(self.mem)<self.mem_cap: self.mem.append(None)
-        self.mem[self.steps%self.mem_cap] = (s,a,r,ns,d)
-        self.steps+=1
-    def learn(self,bs=64):
-        if len(self.mem)<bs: return
-        batch = random.sample(self.mem,bs)
-        s,a,r,ns,d = zip(*batch)
-        s  = torch.tensor(s,device=device).float()
-        ns = torch.tensor([[] if x is None else x for x in ns],device=device).float()
-        a  = torch.tensor(a,device=device).long()
-        r  = torch.tensor(r,device=device).float()
-        d  = torch.tensor(d,device=device).float()
-        qsa = self.net(s).gather(1,a.unsqueeze(1)).squeeze(1)
-        with torch.no_grad():
-            qns,_  = self.tgt(ns).max(1)
-            tgt     = r + self.γ*qns*(1-d)
-        loss = nn.functional.mse_loss(qsa,tgt)
-        self.opt.zero_grad(); loss.backward(); self.opt.step()
-        if self.eps>self.eps_end: self.eps-=self.eps_dec
-        if self.steps%1000==0:
-            self.tgt.load_state_dict(self.net.state_dict())
+# 4. Reinforcement Learning Environment and Agent Setup
+# ---------------------------------------------------------
+# Define anomaly detection environment for RL
+class AnomalyEnv:
+    def __init__(self, errors, labels):
+        self.errors = errors
+        self.labels = labels.astype(int)
+        self.n = len(errors)
+        self.index = 0
+    def reset(self):
+        self.index = 0
+        return None if self.n == 0 else float(self.errors[self.index])
+    def step(self, action):
+        # action: 0 = predict normal, 1 = predict anomaly
+        actual = self.labels[self.index]
+        # Dynamic reward: +1 for TP, 0 for TN, -1 for FP, -1 for FN
+        if action == 1:  # flagged as anomaly
+            reward = 1.0 if actual == 1 else -1.0
+        else:  # predicted normal
+            reward = -1.0 if actual == 1 else 0.0
+        # move to next time step
+        self.index += 1
+        done = (self.index >= self.n)
+        next_state = float(self.errors[self.index]) if not done else None
+        return next_state, reward, done
 
-# ── Active Learning + Training ─────────────────────────────────────────────────
-budgets = [1000,5000,10000]; episodes = 2
-for budget in budgets:
-    os.makedirs(f"exp_AL{budget}",exist_ok=True)
-    per_ep = budget // episodes
-    known = np.full(len(z_val), -1, int)
-    agent = DQN(latent_dim)
-    metrics=[]
-    for ep in range(1,episodes+1):
-        unl = np.where(known==-1)[0]
-        if len(unl)>0:
-            margins = np.array([abs(agent.net(torch.tensor(z_val[i],device=device).float())
-                                    .cpu().detach().numpy().ptp()) for i in unl])
-            ask = unl[np.argsort(margins)[:per_ep]]
-            known[ask] = y_val[ask]
-        # propagate
-        for i in np.where(known==1)[0]:
-            j=i-1
-            while j>=0 and y_val[j]==1: known[j]=1; j-=1
-            j=i+1
-            while j<len(y_val) and y_val[j]==1: known[j]=1; j+=1
-        # train on val
-        for i in range(len(z_val)):
-            s = z_val[i]
-            a = agent.act(s)
-            ext = 1 if (known[i]==1 and a==1) else -1 if (known[i]==1 and a==0) else 0
-            r   = ext + err_val[i]
-            ns  = None if i==len(z_val)-1 else z_val[i+1]
-            done= (i==len(z_val)-1)
-            agent.store(s,a,r,ns,done)
-            agent.learn()
-        with torch.no_grad():
-            qs = agent.net(torch.tensor(z_val,device=device).float()).cpu().numpy()
-        pred = (qs[:,1]>qs[:,0]).astype(int)
-        f1   = f1_score(y_val,pred)
-        aupr = average_precision_score(y_val,qs[:,1]-qs[:,0])
-        metrics.append((f1,aupr))
-        print(f"AL{budget} Ep{ep} VAL f1 {f1:.3f} aupr {aupr:.3f}")
-    pd.DataFrame(metrics,columns=["F1","AUPR"],index=range(1,episodes+1))\
-      .to_csv(f"exp_AL{budget}/val_metrics.csv")
-    # holdout eval
+# Define Q-network for RL agent (inputs state=error, outputs Q for two actions)
+class QNetwork(nn.Module):
+    def __init__(self, state_dim=1, action_dim=2, hidden_dim=16):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, action_dim)
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+
+# Initialize environment and Q-network
+env = AnomalyEnv(recon_errors, y_test)
+q_net = QNetwork().to(device)
+optimizer_q = optim.Adam(q_net.parameters(), lr=1e-3)
+
+# 5. Reinforcement Learning Training (Q-learning with experience replay)
+# ---------------------------------------------------------
+gamma = 0.99
+num_episodes = 20
+epsilon_start = 1.0
+epsilon_end = 0.1
+epsilon_decay = (epsilon_start - epsilon_end) / num_episodes
+memory = deque(maxlen=10000)
+batch_size_rl = 32
+
+for episode in range(num_episodes):
+    state_val = env.reset()
+    total_reward = 0.0
+    # Decay epsilon linearly over episodes
+    epsilon = max(epsilon_end, epsilon_start - episode * epsilon_decay)
+    done = False
+    while not done and state_val is not None:
+        # Epsilon-greedy action selection
+        if random.random() < epsilon:
+            action = random.randint(0, 1)
+        else:
+            state_tensor = torch.tensor([[state_val]], dtype=torch.float32).to(device)
+            with torch.no_grad():
+                q_values = q_net(state_tensor)
+                action = int(torch.argmax(q_values).item())
+        # Take action and observe reward
+        next_state_val, reward, done = env.step(action)
+        total_reward += reward
+        # Store transition in replay memory
+        memory.append((state_val, action, reward, next_state_val, done))
+        # Update current state
+        state_val = next_state_val
+        # Train Q-network on a random batch from memory (experience replay)
+        if len(memory) >= batch_size_rl:
+            batch = random.sample(memory, batch_size_rl)
+            # Prepare batch data
+            state_batch = torch.tensor([[b[0]] for b in batch], dtype=torch.float32).to(device)
+            action_batch = torch.tensor([b[1] for b in batch], dtype=torch.int64).to(device)
+            reward_batch = torch.tensor([b[2] for b in batch], dtype=torch.float32).to(device)
+            next_state_batch = [b[3] for b in batch]
+            done_batch = [b[4] for b in batch]
+            # Compute current Q values for each state-action pair
+            q_values = q_net(state_batch)
+            curr_q = q_values.gather(1, action_batch.unsqueeze(1)).squeeze(1)
+            # Compute target Q values
+            target_q = torch.zeros(batch_size_rl, dtype=torch.float32).to(device)
+            for i in range(batch_size_rl):
+                if done_batch[i] or next_state_batch[i] is None:
+                    target_q[i] = reward_batch[i]
+                else:
+                    ns_tensor = torch.tensor([[next_state_batch[i]]], dtype=torch.float32).to(device)
+                    with torch.no_grad():
+                        next_q_val = q_net(ns_tensor).max().item()
+                    target_q[i] = reward_batch[i] + gamma * next_q_val
+            # Update Q-network
+            loss_q = F.mse_loss(curr_q, target_q)
+            optimizer_q.zero_grad()
+            loss_q.backward()
+            optimizer_q.step()
+    print(f"Episode {episode+1}/{num_episodes} - Total Reward: {total_reward:.2f}, Epsilon: {epsilon:.2f}")
+
+# 6. Evaluation of the Trained Model
+# ---------------------------------------------------------
+env.reset()
+predictions = []
+for err in env.errors:
+    state_tensor = torch.tensor([[err]], dtype=torch.float32).to(device)
     with torch.no_grad():
-        qs_o = agent.net(torch.tensor(z_hold,device=device).float()).cpu().numpy()
-    pred_o = (qs_o[:,1]>qs_o[:,0]).astype(int)
-    f1o = f1_score(y_hold,pred_o)
-    aupo = average_precision_score(y_hold,qs_o[:,1]-qs_o[:,0])
-    print(f"AL{budget} HOLD f1 {f1o:.3f} aupr {aupo:.3f}")
-    pd.DataFrame([[f1o,aupo]],columns=["F1","AUPR"])\
-      .to_csv(f"exp_AL{budget}/holdout_metrics.csv",index=False)
-    plt.figure(figsize=(10,3))
-    plt.plot(y_hold, label="GT")
-    plt.plot(pred_o, label="Pred", alpha=0.7)
-    plt.legend(); plt.title(f"AL{budget} Holdout")
-    plt.savefig(f"exp_AL{budget}/holdout_pred.png"); plt.close()
+        q_values = q_net(state_tensor)
+        action = int(torch.argmax(q_values).item())
+    predictions.append(action)
+predictions = np.array(predictions)
+actual = env.labels
+
+# Calculate metrics
+TP = np.sum((predictions == 1) & (actual == 1))
+FP = np.sum((predictions == 1) & (actual == 0))
+FN = np.sum((predictions == 0) & (actual == 1))
+TN = np.sum((predictions == 0) & (actual == 0))
+precision = TP / (TP + FP + 1e-6)
+recall = TP / (TP + FN + 1e-6)
+f1 = 2 * precision * recall / (precision + recall + 1e-6)
+print("Final Evaluation on Test Data:")
+print(f"TP: {TP}, FP: {FP}, FN: {FN}, TN: {TN}")
+print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}")
