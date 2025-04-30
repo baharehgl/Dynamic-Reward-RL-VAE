@@ -1,241 +1,198 @@
-import os, random
+import os
+import random
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
+import torch
+from torch import nn, optim
+from sklearn.metrics import precision_recall_curve, average_precision_score, f1_score
 import matplotlib.pyplot as plt
-import tensorflow as tf
-from collections import namedtuple
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import precision_recall_fscore_support, average_precision_score
-from sklearn.semi_supervised import LabelSpreading
-from sklearn.ensemble import IsolationForest
-from tensorflow.keras import layers, models, losses
-from tensorflow.keras.models import load_model
 
-from env_wadi import EnvTimeSeriesWaDi
+# ── Reproducibility ─────────────────────────────────────────────────────────────
+seed = 0
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
 
-tf.compat.v1.disable_eager_execution()
+# ── Paths ────────────────────────────────────────────────────────────────────────
+data_dir       = "WaDi"
+features_file  = os.path.join(data_dir, "WADI_14days_new.csv")
+labels_file    = os.path.join(data_dir, "WADI_attackdataLABLE.csv")
 
-# Hyperparameters
-EPISODES                  = 10
-N_STEPS                   = 25
-N_INPUT_DIM               = 2
-N_HIDDEN_DIM              = 128
-DISCOUNT_FACTOR           = 0.5
-TN, TP, FP, FN            = 1, 10, -1, -10
-ACTION_SPACE_N            = 2
-VALIDATION_SEPARATE_RATIO = 0.8
-MAX_WARMUP_SAMPLES        = 10000
-NUM_LABELPROPAGATION      = 200
+# ── Load & Preprocess ───────────────────────────────────────────────────────────
+df_feat = pd.read_csv(features_file)
+df_lbl  = pd.read_csv(labels_file, header=1, low_memory=False)["Attack LABLE (1:No Attack, -1:Attack)"]
+y_all   = np.where(df_lbl.values == 1, 0, 1)  # 0=normal, 1=anomaly
 
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-WA_DI_DIR  = os.path.join(BASE_DIR,'WaDi')
-SENSOR_CSV = os.path.join(WA_DI_DIR,'WADI_14days_new.csv')
-LABEL_CSV  = os.path.join(WA_DI_DIR,'WADI_attackdataLABLE.csv')
+# keep only numeric, non-constant columns
+df_feat = df_feat.select_dtypes(include=[np.number])
+df_feat = df_feat.loc[:, df_feat.std() > 0.0]
 
-# VAE
-class Sampling(layers.Layer):
-    def call(self, inputs):
-        z_mean, z_log_var = inputs
-        batch = tf.shape(z_mean)[0]; dim = tf.shape(z_mean)[1]
-        eps   = tf.keras.backend.random_normal(shape=(batch,dim))
-        return z_mean + tf.exp(0.5*z_log_var)*eps
+# fill NaNs
+df_feat.fillna(df_feat.mean(), inplace=True)
+X_all = df_feat.values.astype(np.float32)
 
-def build_vae(original_dim, latent_dim=10, intermediate_dim=64):
-    inp       = layers.Input(shape=(original_dim,))
-    h         = layers.Dense(intermediate_dim, activation='relu')(inp)
-    z_mean    = layers.Dense(latent_dim)(h)
-    z_log_var = layers.Dense(latent_dim)(h)
-    z_log_var = tf.clip_by_value(z_log_var,-10.0,10.0)
-    z         = Sampling()([z_mean, z_log_var])
-    h_dec     = layers.Dense(intermediate_dim, activation='relu')(z)
-    out       = layers.Dense(original_dim, activation='sigmoid')(h_dec)
-    vae       = models.Model(inp,out)
-    recon     = losses.mse(inp,out)*original_dim
-    kl        = -0.5*tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var),axis=-1)
-    vae.add_loss(tf.reduce_mean(recon+kl))
-    vae.compile(optimizer='adam')
-    return vae
+# ── 80/20 Split ─────────────────────────────────────────────────────────────────
+n = len(X_all)
+split_idx = int(n * 0.8)
+X_val     = X_all[:split_idx]
+y_val     = y_all[:split_idx]
+X_hold    = X_all[split_idx:]
+y_hold    = y_all[split_idx:]
 
-# State & Reward
-def RNNBinaryStateFuc(ts,c,prev=None,action=None):
-    if c==N_STEPS:
-        s=[[ts['value'].iat[i],0] for i in range(N_STEPS)]
-        s.pop(0); s.append([ts['value'].iat[N_STEPS],1])
-        return np.array(s,dtype='float32')
-    if c> N_STEPS:
-        s0=np.concatenate((prev[1:],[[ts['value'].iat[c],0]]))
-        s1=np.concatenate((prev[1:],[[ts['value'].iat[c],1]]))
-        return np.array([s0,s1],dtype='float32')
-    return None
+# ── MinMax Scaling based on val set ──────────────────────────────────────────────
+min_v = X_val.min(axis=0)
+max_v = X_val.max(axis=0)
+rng   = np.where(max_v - min_v == 0, 1.0, max_v - min_v)
+X_val_s  = (X_val  - min_v) / rng
+X_hold_s = (X_hold - min_v) / rng
 
-def RNNBinaryRewardFuc(ts,c,action,vae_model=None,coef=1.0,include_vae=True):
-    if c< N_STEPS: return [0,0]
-    penalty=0.0
-    if include_vae and vae_model:
-        win   = ts['value'].values[c-N_STEPS:c].reshape(1,-1)
-        recon = vae_model.predict(win)
-        penalty = coef * np.mean((recon-win)**2)
-    lbl = ts['label'].iat[c]
-    return [TN+penalty,FP+penalty] if lbl==0 else [FN+penalty,TP+penalty]
+# ── VAE Definition ──────────────────────────────────────────────────────────────
+device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+input_dim  = X_val_s.shape[1]
+latent_dim = 5
 
-def RNNBinaryRewardFucTest(ts,c,action):
-    if c< N_STEPS: return [0,0]
-    lbl=ts['anomaly'].iat[c]
-    return [TN,FP] if lbl==0 else [FN,TP]
+class VAE(nn.Module):
+    def __init__(self, D, L, H=64):
+        super().__init__()
+        self.enc1 = nn.Linear(D,H); self.enc2 = nn.Linear(H,H//2)
+        self.mu   = nn.Linear(H//2, L); self.logv = nn.Linear(H//2, L)
+        self.dec1 = nn.Linear(L, H//2); self.dec2 = nn.Linear(H//2,H)
+        self.out  = nn.Linear(H, D); self.relu = nn.ReLU()
+    def encode(self,x):
+        h = self.relu(self.enc1(x)); h = self.relu(self.enc2(h))
+        return self.mu(h), self.logv(h)
+    def reparam(self,m,lv):
+        std = torch.exp(0.5*lv); eps = torch.randn_like(std)
+        return m + eps*std
+    def decode(self,z):
+        h = self.relu(self.dec1(z)); h = self.relu(self.dec2(h))
+        return self.out(h)
+    def forward(self,x):
+        m,lv = self.encode(x); z=self.reparam(m,lv)
+        return self.decode(z), m, lv
 
-# Q-Network
-class Q_Estimator_Nonlinear:
-    def __init__(self,lr=3e-4,scope='q'):
-        self.scope=scope
-        with tf.compat.v1.variable_scope(scope):
-            self.state  = tf.compat.v1.placeholder(tf.float32,[None,N_STEPS,N_INPUT_DIM],name='state')
-            self.target = tf.compat.v1.placeholder(tf.float32,[None,ACTION_SPACE_N],name='target')
-            seq = tf.compat.v1.unstack(self.state,N_STEPS,axis=1)
-            cell= tf.compat.v1.nn.rnn_cell.LSTMCell(N_HIDDEN_DIM)
-            out,_= tf.compat.v1.nn.static_rnn(cell,seq,dtype=tf.float32)
-            self.logits   = layers.Dense(ACTION_SPACE_N)(out[-1])
-            self.loss     = tf.reduce_mean(tf.square(self.logits-self.target))
-            self.train_op = tf.compat.v1.train.AdamOptimizer(lr).minimize(self.loss)
+vae      = VAE(input_dim, latent_dim).to(device)
+opt_vae  = optim.Adam(vae.parameters(), lr=1e-3)
+epochs   = 10; bs = 256
+vae.train()
+for ep in range(epochs):
+    perm, tot = np.random.permutation(len(X_val_s)), 0.0
+    for i in range(0, len(X_val_s), bs):
+        batch = torch.tensor(X_val_s[perm[i:i+bs]],device=device)
+        opt_vae.zero_grad()
+        recon, m, lv = vae(batch)
+        mse = nn.functional.mse_loss(recon, batch, reduction="sum")
+        kl  = -0.5*torch.sum(1+lv - m.pow(2) - lv.exp())
+        loss = mse + kl; loss.backward(); opt_vae.step()
+        tot += loss.item()
+    print(f"VAE Ep{ep+1}/{epochs} avg loss {tot/len(X_val_s):.4f}")
+vae.eval()
 
-    def predict(self, state, sess):
-        return sess.run(self.logits, {self.state: state})
+# ── Latent & Recon Errors ────────────────────────────────────────────────────────
+with torch.no_grad():
+    tv    = torch.tensor(X_val_s,device=device)
+    rv, mv, lv_ = vae(tv)
+    z_val    = mv.cpu().numpy()
+    err_val  = np.mean((rv.cpu().numpy() - X_val_s)**2, axis=1)
+    th99     = np.percentile(err_val,99)
+    ths     = torch.tensor(X_hold_s,device=device)
+    rh, mh, lh = vae(ths)
+    z_hold   = mh.cpu().numpy()
+    err_hold = np.mean((rh.cpu().numpy() - X_hold_s)**2, axis=1)
 
-    def update(self, state, target, sess):
-        sess.run(self.train_op, {self.state: state, self.target: target})
+# ── DQN Agent ────────────────────────────────────────────────────────────────────
+class DQN:
+    def __init__(self,S,A=2,H=64,lr=1e-3,γ=0.99):
+        self.net = nn.Sequential(nn.Linear(S,H),nn.ReLU(),
+                                  nn.Linear(H,H),nn.ReLU(),
+                                  nn.Linear(H,A)).to(device)
+        self.tgt = nn.Sequential(*[l for l in self.net]).to(device)
+        self.tgt.load_state_dict(self.net.state_dict())
+        self.opt  = optim.Adam(self.net.parameters(), lr=lr)
+        self.γ     = γ; self.eps=1.0; self.eps_end=0.1; self.eps_dec=1e-3
+        self.mem   = []; self.mem_cap=50000; self.steps=0
+    def act(self,s):
+        if random.random()<self.eps:
+            return random.randrange(2)
+        with torch.no_grad():
+            q = self.net(torch.tensor(s,device=device).float().unsqueeze(0))
+            return int(q.argmax().cpu())
+    def store(self,s,a,r,ns,d):
+        if len(self.mem)<self.mem_cap: self.mem.append(None)
+        self.mem[self.steps%self.mem_cap] = (s,a,r,ns,d)
+        self.steps+=1
+    def learn(self,bs=64):
+        if len(self.mem)<bs: return
+        batch = random.sample(self.mem,bs)
+        s,a,r,ns,d = zip(*batch)
+        s  = torch.tensor(s,device=device).float()
+        ns = torch.tensor([[] if x is None else x for x in ns],device=device).float()
+        a  = torch.tensor(a,device=device).long()
+        r  = torch.tensor(r,device=device).float()
+        d  = torch.tensor(d,device=device).float()
+        qsa = self.net(s).gather(1,a.unsqueeze(1)).squeeze(1)
+        with torch.no_grad():
+            qns,_  = self.tgt(ns).max(1)
+            tgt     = r + self.γ*qns*(1-d)
+        loss = nn.functional.mse_loss(qsa,tgt)
+        self.opt.zero_grad(); loss.backward(); self.opt.step()
+        if self.eps>self.eps_end: self.eps-=self.eps_dec
+        if self.steps%1000==0:
+            self.tgt.load_state_dict(self.net.state_dict())
 
-# Helpers
-def make_epsilon_greedy_policy(est,nA,sess):
-    def policy_fn(obs,eps):
-        A=np.ones(nA)*eps/nA
-        q=est.predict([obs],sess)[0]
-        if len(q)==0: return np.ones(nA)/nA
-        b=np.argmax(q); A[b]+=(1.0-eps)
-        return A
-    return policy_fn
-
-def safe_argmax(probs):
-    return 0 if probs is None or len(probs)==0 else np.argmax(probs)
-
-def safe_choice(probs):
-    return 0 if probs is None or len(probs)==0 else np.random.choice(len(probs),p=probs)
-
-def copy_model_parameters(sess,src,dest):
-    sv=tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,scope=src.scope)
-    dv=tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,scope=dest.scope)
-    for s,d in zip(sorted(sv,key=lambda v:v.name), sorted(dv,key=lambda v:v.name)):
-        sess.run(d.assign(s))
-
-# Q-Learning
-def q_learning(env,sess,ql,qt,num_episodes,num_epoches,update_target_every,eps_start,eps_end,eps_steps,batch_size,coef,discount,num_LP,num_AL):
-    T=namedtuple('T',['s','r','ns','d']); mem=[]
-    sess.run(tf.compat.v1.global_variables_initializer())
-    epsilons=np.linspace(eps_start,eps_end,eps_steps)
-    policy=make_epsilon_greedy_policy(ql,ACTION_SPACE_N,sess)
-    # warm-up
-    env.reset(); data=[s for s in env.states_list if s is not None][:MAX_WARMUP_SAMPLES]
-    X=np.array([s[-1][0] for s in data]).reshape(-1,1)
-    IsolationForest(contamination=0.01).fit(X)
-
-    for ep in range(num_episodes):
-        # LabelSpreading only if labels exist
-        labs = np.array([env.timeseries['label'].iat[i] for i in range(N_STEPS,len(env.timeseries))])
-        if np.any(labs!=-1):
-            arr  = np.array(env.states_list)
-            flat = arr.reshape(arr.shape[0],-1)
-            lp   = LabelSpreading(kernel='knn',n_neighbors=10)
-            lp.fit(flat,labs)
-            uncert = np.argsort(-np.max(lp.label_distributions_,axis=1))[:num_LP]
-            for u in uncert: env.timeseries['label'].iat[u+N_STEPS]=lp.transduction_[u]
-        # Active Learning
-        if 'uncert' in locals():
-            for u in uncert[:num_AL]:
-                env.timeseries['label'].iat[u+N_STEPS]=env.timeseries['anomaly'].iat[u+N_STEPS]
-        # rollout
-        state, ep_r = env.reset(), 0
-        while True:
-            eps   = epsilons[min(ep,len(epsilons)-1)]
-            probs = policy(state,eps); a=safe_choice(probs)
-            raw, r, done, _ = env.step(a)
-            # shrink state
-            state = raw[a] if (isinstance(raw,np.ndarray) and raw.ndim>2) else raw
-            ep_r+=r[a]; mem.append(T(state,r,raw,done))
-            if done: break
-        # train
-        for _ in range(num_epoches):
-            batch=random.sample(mem,batch_size)
-            S,R,NS,D=map(np.array,zip(*batch))
-            # split next states
-            q0=qt.predict(NS[:,0],sess); q1=qt.predict(NS[:,1],sess)
-            tgt=R+discount*np.stack((q0.max(1),q1.max(1)),axis=1)
-            ql.update(S,tgt,sess)
-        if ep%update_target_every==0: copy_model_parameters(sess,ql,qt)
-
-# Validation
-def q_learning_validator(env,sess,trained,split_idx,record_dir,plot=True):
-    os.makedirs(record_dir,exist_ok=True); f=open(os.path.join(record_dir,'perf.txt'),'w')
-    all_f1,all_aupr=[],[]
-    for i in range(EPISODES):
-        policy=make_epsilon_greedy_policy(trained,ACTION_SPACE_N,sess)
-        state=env.reset()
-        # skip train portion
-        while env.timeseries_curser<split_idx:
-            raw,_,done,_=env.step(0)
-            state = raw[0] if (isinstance(raw,np.ndarray) and raw.ndim>2) else raw
-            if done: break
-        preds,gts,vals=[],[],[]
-        while True:
-            probs=policy(state,0); a=safe_argmax(probs)
-            preds.append(a); gts.append(env.timeseries['anomaly'].iat[env.timeseries_curser])
-            vals.append(state[-1][0])
-            raw,_,done,_=env.step(a)
-            state = raw[a] if (isinstance(raw,np.ndarray) and raw.ndim>2) else raw
-            if done: break
-        p,r,f1,_=precision_recall_fscore_support(gts,preds,average='binary',zero_division=0)
-        aupr=average_precision_score(gts,preds)
-        f.write(f"E{i+1}:P={p:.3f},R={r:.3f},F1={f1:.3f},AUPR={aupr:.3f}\n")
-        all_f1.append(f1); all_aupr.append(aupr)
-        if plot:
-            fig,ax=plt.subplots(4,1,sharex=True)
-            ax[0].plot(vals);ax[0].set_title('TS')
-            ax[1].plot(preds,'g-');ax[1].set_title('Pred')
-            ax[2].plot(gts,'r-');ax[2].set_title('GT')
-            ax[3].plot([aupr]*len(vals),'m-');ax[3].set_title('AUPR')
-            fig.savefig(os.path.join(record_dir,f'v{i+1}.png'));plt.close(fig)
-    f.close(); return np.mean(all_f1),np.mean(all_aupr)
-
-# Main
-def pretrain_vae():
-    tf.compat.v1.reset_default_graph()
-    from tensorflow.compat.v1.keras import backend as K; sess=tf.compat.v1.Session();K.set_session(sess)
-    df    = pd.read_csv(SENSOR_CSV)
-    raw   = pd.read_csv(LABEL_CSV,header=1,low_memory=False)["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
-    labels= np.where(raw==1,0,1)
-    L     = min(len(df),len(labels))
-    vals  = df['TOTAL_CONS_REQUIRED_FLOW'].values[:L]
-    normal= vals[labels[:L]==0]
-    W     = [normal[i:i+N_STEPS] for i in range(len(normal)-N_STEPS+1)]
-    X     = np.array(W,dtype=np.float32)
-    Xs    = StandardScaler().fit_transform(X)
-    vae   = build_vae(N_STEPS)
-    with sess.as_default(): vae.fit(Xs,epochs=50,batch_size=32,verbose=1)
-    vae.save('vae_wadi.h5'); sess.close()
-
-def main():
-    pretrain_vae()
-    for AL in [1000,5000,10000]:
-        tf.compat.v1.reset_default_graph()
-        sess=tf.compat.v1.Session(); from tensorflow.compat.v1.keras import backend as K2;K2.set_session(sess)
-        vae_model=load_model('vae_wadi.h5',custom_objects={'Sampling':Sampling},compile=False)
-        env=EnvTimeSeriesWaDi(SENSOR_CSV,LABEL_CSV,N_STEPS)
-        env.statefnc=RNNBinaryStateFuc
-        env.rewardfnc=lambda ts,tc,a: RNNBinaryRewardFuc(ts,tc,a,vae_model,coef=20.0,include_vae=True)
-        ql=Q_Estimator_Nonlinear(scope='qlearn'); qt=Q_Estimator_Nonlinear(scope='qtarget')
-        split_idx=int(len(env.timeseries_repo[0])*VALIDATION_SEPARATE_RATIO)
-        q_learning(env,sess,ql,qt,EPISODES,5,500,1.0,0.1,10000,256,20.0,DISCOUNT_FACTOR,NUM_LABELPROPAGATION,AL)
-        exp_dir=f'exp_AL{AL}'; val_dir=os.path.join(exp_dir,'validation')
-        f1,aupr=q_learning_validator(env,sess,ql,split_idx,val_dir,plot=True)
-        print(f"AL={AL}: F1={f1:.3f}, AUPR={aupr:.3f}")
-
-if __name__=="__main__": main()
+# ── Active Learning + Training ─────────────────────────────────────────────────
+budgets = [1000,5000,10000]; episodes = 10
+for budget in budgets:
+    os.makedirs(f"exp_AL{budget}",exist_ok=True)
+    per_ep = budget // episodes
+    known = np.full(len(z_val), -1, int)
+    agent = DQN(latent_dim)
+    metrics=[]
+    for ep in range(1,episodes+1):
+        unl = np.where(known==-1)[0]
+        if len(unl)>0:
+            margins = np.array([abs(agent.net(torch.tensor(z_val[i],device=device).float())
+                                    .cpu().detach().numpy().ptp()) for i in unl])
+            ask = unl[np.argsort(margins)[:per_ep]]
+            known[ask] = y_val[ask]
+        # propagate
+        for i in np.where(known==1)[0]:
+            j=i-1
+            while j>=0 and y_val[j]==1: known[j]=1; j-=1
+            j=i+1
+            while j<len(y_val) and y_val[j]==1: known[j]=1; j+=1
+        # train on val
+        for i in range(len(z_val)):
+            s = z_val[i]
+            a = agent.act(s)
+            ext = 1 if (known[i]==1 and a==1) else -1 if (known[i]==1 and a==0) else 0
+            r   = ext + err_val[i]
+            ns  = None if i==len(z_val)-1 else z_val[i+1]
+            done= (i==len(z_val)-1)
+            agent.store(s,a,r,ns,done)
+            agent.learn()
+        with torch.no_grad():
+            qs = agent.net(torch.tensor(z_val,device=device).float()).cpu().numpy()
+        pred = (qs[:,1]>qs[:,0]).astype(int)
+        f1   = f1_score(y_val,pred)
+        aupr = average_precision_score(y_val,qs[:,1]-qs[:,0])
+        metrics.append((f1,aupr))
+        print(f"AL{budget} Ep{ep} VAL f1 {f1:.3f} aupr {aupr:.3f}")
+    pd.DataFrame(metrics,columns=["F1","AUPR"],index=range(1,episodes+1))\
+      .to_csv(f"exp_AL{budget}/val_metrics.csv")
+    # holdout eval
+    with torch.no_grad():
+        qs_o = agent.net(torch.tensor(z_hold,device=device).float()).cpu().numpy()
+    pred_o = (qs_o[:,1]>qs_o[:,0]).astype(int)
+    f1o = f1_score(y_hold,pred_o)
+    aupo = average_precision_score(y_hold,qs_o[:,1]-qs_o[:,0])
+    print(f"AL{budget} HOLD f1 {f1o:.3f} aupr {aupo:.3f}")
+    pd.DataFrame([[f1o,aupo]],columns=["F1","AUPR"])\
+      .to_csv(f"exp_AL{budget}/holdout_metrics.csv",index=False)
+    plt.figure(figsize=(10,3))
+    plt.plot(y_hold, label="GT")
+    plt.plot(pred_o, label="Pred", alpha=0.7)
+    plt.legend(); plt.title(f"AL{budget} Holdout")
+    plt.savefig(f"exp_AL{budget}/holdout_pred.png"); plt.close()
