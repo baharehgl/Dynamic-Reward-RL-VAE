@@ -1,3 +1,4 @@
+
 import os
 import random
 import numpy as np
@@ -25,7 +26,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 gpus = tf.config.list_physical_devices('GPU')
 print("GPUs detected by TensorFlow:", gpus)
 
-# ─── HYPERPARAMETERS & PATHS ────────────────────────────────────────────────────
+# ─── HYPERPARAMETERS & PATHS ──────────────────────────────────────────────────
 EPISODES           = 2
 N_STEPS            = 25
 DISCOUNT_FACTOR    = 0.5
@@ -44,36 +45,36 @@ WA_DI_DIR  = os.path.join(BASE_DIR, 'WaDi')
 SENSOR_CSV = os.path.join(WA_DI_DIR, 'WADI_14days_new.csv')
 LABEL_CSV  = os.path.join(WA_DI_DIR, 'WADI_attackdataLABLE.csv')
 
-print("=== WADI dynamic-reward RL: start ===\n")
+print("=== WADI RL with dynamic reward & active learning ===\n")
 
-# ─── 1) Load numeric sensor features ─────────────────────────────────────────────
+# ─── 1) Load numeric sensor features ────────────────────────────────────────────
 df_all = pd.read_csv(SENSOR_CSV)
 feature_cols = df_all.select_dtypes(include=[np.number]).columns.tolist()
-n_features = len(feature_cols)
-N_INPUT_DIM = n_features + 1  # plus action bit
-print(f"[1] Using {n_features} numeric features; N_INPUT_DIM = {N_INPUT_DIM}\n")
+n_features   = len(feature_cols)
+N_INPUT_DIM  = n_features + 1  # plus action bit
+print(f"Detected {n_features} numeric features; N_INPUT_DIM = {N_INPUT_DIM}\n")
 
 # ─── 2) Pretrain VAE on sampled normal windows ─────────────────────────────────
-print("[2] Pretraining VAE on sampled normal windows...")
-# Load labels and map 1->0 (normal), -1->1 (anomaly)
+print("Pretraining VAE on sampled normal windows...")
+# Load and map labels
 lbl_df  = pd.read_csv(LABEL_CSV, header=1, low_memory=False)
 raw_lbl = lbl_df["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
 labels  = np.where(raw_lbl == 1, 0, 1)
-print(f"[2] Loaded {len(labels)} labels (1->0 normal, -1->1 anomaly)")
-# Identify normal time-points (excluding first N_STEPS)
 normal_pos = np.where(labels[N_STEPS:] == 0)[0] + N_STEPS
-print(f"[2] Found {len(normal_pos)} normal positions")
-# Sample up to MAX_VAE_SAMPLES
-sampled = np.random.choice(normal_pos, size=min(MAX_VAE_SAMPLES, len(normal_pos)), replace=False)
+sampled    = np.random.choice(normal_pos, size=min(MAX_VAE_SAMPLES, len(normal_pos)), replace=False)
+print(f"Sampling {len(sampled)} windows for VAE training...")
 # Build windows
 windows = [df_all[feature_cols].iloc[i-N_STEPS+1:i+1].values.flatten() for i in sampled]
-print(f"[2] Built {len(windows)} windows of length {N_STEPS * n_features}")
+print(f"Built {len(windows)} windows; each of length {N_STEPS * n_features}\n")
 # Standardize
-X  = np.array(windows, dtype='float32')
-Xs = StandardScaler().fit_transform(X)
-print(f"[2] Xs shape: {Xs.shape}\n")
+def preprocess_windows(wins):
+    X  = np.array(wins, dtype='float32')
+    return StandardScaler().fit_transform(X)
+Xs = preprocess_windows(windows)
+print(f"Standardized windows shape: {Xs.shape}\n")
 
 # VAE definition
+
 def build_vae(input_dim, latent_dim=10, hidden=64):
     inp = layers.Input(shape=(input_dim,))
     h   = layers.Dense(hidden, activation='relu')(inp)
@@ -92,12 +93,12 @@ def build_vae(input_dim, latent_dim=10, hidden=64):
     return vae
 
 vae = build_vae(N_STEPS * n_features)
-print(f"[2] Fitting VAE: epochs={VAE_EPOCHS}, batch_size={VAE_BATCH}")
+print(f"Fitting VAE: epochs={VAE_EPOCHS}, batch_size={VAE_BATCH}...")
 vae.fit(Xs, epochs=VAE_EPOCHS, batch_size=VAE_BATCH, verbose=1)
 vae.save('vae_wadi.h5')
-print("[2] VAE pretraining complete; saved to vae_wadi.h5\n")
+print("VAE pretraining complete; model saved to vae_wadi.h5\n")
 
-# ─── 3) State & Reward functions ────────────────────────────────────────────────
+# ─── 3) State & Reward Functions ───────────────────────────────────────────────
 def make_state(ts, c):
     if c < N_STEPS: return None
     W  = ts[feature_cols].iloc[c-N_STEPS+1:c+1].values.astype('float32')
@@ -113,12 +114,7 @@ def reward_fn(ts, c, a, vae_model, coef):
     base = [TN,FP] if lbl==0 else [FN,TP]
     return [base[0]+pen, base[1]+pen]
 
-def reward_test(ts, c, a):
-    if c < N_STEPS: return [0,0]
-    lbl = ts['anomaly'].iat[c]
-    return [TN,FP] if lbl==0 else [FN,TP]
-
-# ─── 4) Q-network ───────────────────────────────────────────────────────────────
+# ─── 4) Q-Network ───────────────────────────────────────────────────────────────
 class QNet:
     def __init__(self, scope, lr=3e-4):
         self.scope = scope
@@ -132,7 +128,7 @@ class QNet:
             self.loss     = tf.reduce_mean(tf.square(self.logits - self.T))
             self.train_op = tf.compat.v1.train.AdamOptimizer(lr).minimize(self.loss)
     def predict(self, s, sess): return sess.run(self.logits, {self.S: s})
-    def update(self, s, t, sess): sess.run(self.train_op, {self.S: s, self.T: t})
+    def update (self, s,t, sess): sess.run(self.train_op, {self.S: s, self.T: t})
 
 def epsilon_policy(est, nA, sess):
     def pol(obs, eps):
@@ -148,7 +144,7 @@ def copy_params(sess, src, dst):
     for s,t in zip(sorted(vs,key=lambda v:v.name), sorted(vt,key=lambda v:v.name)):
         sess.run(t.assign(s))
 
-# ─── 5) Q-learning with dynamic reward & Active Learning ─────────────────────────
+# ─── 5) Q-Learning with dynamic reward & Active Learning ────────────────────────
 def update_coef(old, ep_reward, alpha=0.001, target=0.0, lo=0.1, hi=100.0):
     new = old + alpha*(ep_reward - target)
     return max(min(new, hi), lo)
@@ -156,32 +152,33 @@ def update_coef(old, ep_reward, alpha=0.001, target=0.0, lo=0.1, hi=100.0):
 def q_learning(env, sess, ql, qt, vae_model, init_coef):
     Transition = namedtuple('T',['s','r','ns','d'])
     sess.run(tf.compat.v1.global_variables_initializer())
-    epss   = np.linspace(1.0,0.1,10000)
+    epss   = np.linspace(1.0, 0.1, 10000)
     policy = epsilon_policy(ql, ACTION_SPACE_N, sess)
 
-    # Warm-up
+    # Warm-up IsolationForest
     env.reset()
     W=[]
     for i in range(N_STEPS, len(env.timeseries)):
         if env.timeseries['label'].iat[i]==0:
             W.append(env.timeseries[feature_cols].iloc[i-N_STEPS+1:i+1].values.flatten())
-    if W:
+    if len(W):
         IsolationForest(contamination=0.01).fit(np.array(W[:MAX_VAE_SAMPLES],dtype='float32'))
 
     dynamic_coef = init_coef
-    memory = []
+    memory       = []
     coef_history = []
 
     for ep in range(EPISODES):
+        uncert = []
         env.statefnc  = make_state
         env.rewardfnc = lambda ts,c,a,coef=dynamic_coef: reward_fn(ts,c,a,vae_model,coef)
 
         # Label Propagation
         labs = np.array(env.timeseries['label'].iloc[N_STEPS:])
-        if np.any(labs!=-1):
+        if np.any(labs != -1):
             arr  = np.array([s for s in env.states_list if s is not None])
             flat = arr.reshape(arr.shape[0],-1)
-            lp   = LabelSpreading(kernel='knn',n_neighbors=10).fit(flat,labs)
+            lp   = LabelSpreading(kernel='knn', n_neighbors=10).fit(flat, labs)
             uncert = np.argsort(-np.max(lp.label_distributions_,axis=1))[:NUM_LP]
             for u in uncert:
                 env.timeseries['label'].iat[u+N_STEPS] = lp.transduction_[u]
@@ -190,25 +187,26 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
         for u in uncert[:NUM_AL]:
             env.timeseries['label'].iat[u+N_STEPS] = env.timeseries['anomaly'].iat[u+N_STEPS]
 
+        # Rollout
         state, done = env.reset(), False
-        ep_reward = 0.0
+        ep_reward   = 0.0
         while not done:
-            eps = epss[min(ep, len(epss)-1)]
-            probs = policy(state, eps)
-            a = np.random.choice(ACTION_SPACE_N, p=probs)
+            eps  = epss[min(ep, len(epss)-1)]
+            probs= policy(state, eps)
+            a    = np.random.choice(ACTION_SPACE_N, p=probs)
             raw, r, done, _ = env.step(a)
-            ns = raw[a] if raw.ndim>2 else raw
+            ns            = raw[a] if raw.ndim>2 else raw
             memory.append(Transition(state, r, ns, done))
-            ep_reward += r[a]
-            state = ns
+            ep_reward    += r[a]
+            state         = ns
 
-        # Training
+        # Training on replay memory
         for _ in range(5):
             batch = random.sample(memory, BATCH_SIZE)
             S,R,NS,_ = map(np.array, zip(*batch))
             q0 = qt.predict(NS[:,0], sess)
             q1 = qt.predict(NS[:,1], sess)
-            tgt = R + DISCOUNT_FACTOR * np.stack((q0.max(1),q1.max(1)),axis=1)
+            tgt = R + DISCOUNT_FACTOR * np.stack((q0.max(1), q1.max(1)), axis=1)
             ql.update(S, tgt, sess)
 
         copy_params(sess, ql, qt)
@@ -241,6 +239,7 @@ def validate(env, sess, trained):
             aupr     = average_precision_score(gts,preds)
             fout.write(f"E{i+1}:P={p:.3f},R={r:.3f},F1={f1:.3f},AUPR={aupr:.3f}\n")
             f1s.append(f1); auprs.append(aupr)
+    print(f"Validation complete: Avg F1={np.mean(f1s):.3f}, Avg AUPR={np.mean(auprs):.3f}")
     return np.mean(f1s), np.mean(auprs)
 
 # ─── 7) Main wrapper ─────────────────────────────────────────────────────────────
@@ -249,11 +248,18 @@ def train_wrapper(nLP, nAL, discount):
     sess = tf.compat.v1.Session()
     from tensorflow.compat.v1.keras import backend as K; K.set_session(sess)
 
+    # load pretrained VAE
     vae_model = load_model('vae_wadi.h5', compile=False)
+    # initialize environment & networks
     env       = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
-    ql, coefs = q_learning(env, sess, QNet('qlearn'), QNet('qtarget'), vae_model, init_coef=20.0)
-    f1, aupr  = validate(EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS), sess, ql)
+    ql, qt    = QNet('qlearn'), QNet('qtarget')
 
+    # run RL
+    trained, coefs = q_learning(env, sess, ql, qt, vae_model, init_coef=20.0)
+    # validate
+    f1, aupr      = validate(EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS), sess, trained)
+
+    # plot dynamic_coef
     exp = f'exp_AL{nAL}'
     os.makedirs(os.path.join(exp,'plots'), exist_ok=True)
     plt.figure(); plt.plot(coefs); plt.title('dynamic_coef'); plt.savefig(os.path.join(exp,'plots','coef.png'))
