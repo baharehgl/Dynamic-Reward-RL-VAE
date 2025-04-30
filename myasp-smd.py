@@ -29,7 +29,8 @@ from sklearn.svm import OneClassSVM
 from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+#os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+print(os.environ["CUDA_VISIBLE_DEVICES"])
 
 ############################
 # Macros and Hyperparameters.
