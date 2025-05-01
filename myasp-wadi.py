@@ -20,7 +20,6 @@ from collections import namedtuple
 
 # Custom WADI environment
 from env_wadi import EnvTimeSeriesWaDi
-
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 gpus = tf.config.list_physical_devices('GPU')
 print("GPUs detected by TensorFlow:", gpus)
@@ -35,7 +34,7 @@ VALIDATION_SPLIT   = 0.8
 MAX_VAE_SAMPLES    = 10
 NUM_LP             = 200    # Label-Propagation budget
 NUM_AL             = 1000   # Active-Learning budget
-BATCH_SIZE         = 128
+BATCH_SIZE         = 256
 VAE_EPOCHS         = 2
 VAE_BATCH          = 32
 
@@ -46,13 +45,14 @@ LABEL_CSV  = os.path.join(WA_DI_DIR, 'WADI_attackdataLABLE.csv')
 
 print("=== WADI RL with dynamic reward & active learning ===\n")
 
-# ─── 1) Load sensor data and select numeric features ───────────────────────────
+# ─── 1) Load sensor data and select numeric features ──────────────────────────
 df_all = pd.read_csv(SENSOR_CSV)
-# If there's an index or 'Row' column, drop it
-if 'Row' in df_all.columns:
-    df_all.drop(columns=['Row'], inplace=True)
-# Select only numeric columns (skip dates, strings)
-feature_cols = [c for c in df_all.columns if np.issubdtype(df_all[c].dtype, np.number)]
+# Drop any index/string columns
+non_numeric = [c for c in df_all.columns if not np.issubdtype(df_all[c].dtype, np.number)]
+for c in non_numeric:
+    print(f"Dropping non-numeric column: {c}")
+df_all = df_all.drop(columns=non_numeric)
+feature_cols = df_all.columns.tolist()
 n_features   = len(feature_cols)
 N_INPUT_DIM  = n_features + 1  # plus action bit
 print(f"Detected {n_features} numeric features; N_INPUT_DIM = {N_INPUT_DIM}\n")
@@ -62,13 +62,12 @@ print("Pretraining VAE on sampled normal windows...")
 lbl_df  = pd.read_csv(LABEL_CSV, header=1, low_memory=False)
 raw_lbl = lbl_df["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
 labels  = np.where(raw_lbl == 1, 0, 1)
-# Identify normal positions (exclude first N_STEPS)
+# Identify normal positions
 normal_pos = np.where(labels[N_STEPS:] == 0)[0] + N_STEPS
-# Sample up to MAX_VAE_SAMPLES
 sampled    = np.random.choice(normal_pos, size=min(MAX_VAE_SAMPLES, len(normal_pos)), replace=False)
 print(f"Sampling {len(sampled)} windows for VAE training...")
-# Build sliding windows
-windows = [df_all[feature_cols].iloc[i-N_STEPS+1:i+1].values.flatten() for i in sampled]
+# Build windows
+windows = [df_all.iloc[i-N_STEPS+1:i+1][feature_cols].values.flatten() for i in sampled]
 print(f"Built {len(windows)} windows each of length {N_STEPS * n_features}\n")
 # Standardize
 X  = np.array(windows, dtype='float32')
@@ -144,7 +143,7 @@ def copy_params(sess, src, dst):
     for s,t in zip(sorted(vs,key=lambda v:v.name), sorted(vt,key=lambda v:v.name)):
         sess.run(t.assign(s))
 
-# ─── 5) Q-Learning with dynamic reward & Active Learning ───────────────────────
+# ─── 5) Q-Learning with dynamic reward & Active Learning ────────────────────────
 def update_coef(old, ep_reward, alpha=0.001, target=0.0, lo=0.1, hi=100.0):
     new = old + alpha*(ep_reward - target)
     return max(min(new, hi), lo)
@@ -169,9 +168,7 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
     coef_history = []
 
     for ep in range(EPISODES):
-        # Initialize uncertain list each episode
-        uncert = []
-
+        uncert = []  # ensure defined each episode
         env.statefnc  = make_state
         env.rewardfnc = lambda ts,c,a,coef=dynamic_coef: reward_fn(ts,c,a,vae_model,coef)
 
@@ -250,12 +247,12 @@ def train_wrapper(nLP, nAL, discount):
     sess = tf.compat.v1.Session()
     from tensorflow.compat.v1.keras import backend as K; K.set_session(sess)
 
-    vae_model = load_model('vae_wadi.h5', compile=False)
-    env       = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
-    ql, qt    = QNet('qlearn'), QNet('qtarget')
+    vae_model    = load_model('vae_wadi.h5', compile=False)
+    env          = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
+    ql, qt       = QNet('qlearn'), QNet('qtarget')
 
     trained, coefs = q_learning(env, sess, ql, qt, vae_model, init_coef=20.0)
-    f1, aupr      = validate(EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS), sess, trained)
+    f1, aupr       = validate(EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS), sess, trained)
 
     exp = f'exp_AL{nAL}'
     os.makedirs(os.path.join(exp,'plots'), exist_ok=True)
