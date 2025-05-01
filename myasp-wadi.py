@@ -304,6 +304,7 @@ def train_wrapper(nLP, nAL, discount):
 
     vae_model = load_model('vae_wadi.h5', compile=False)
     env       = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
+    env.statefnc = make_state
     ql, qt    = QNet('qlearn'), QNet('qtarget')
 
     trained, coefs = q_learning(env, sess, ql, qt, vae_model, init_coef=20.0)
