@@ -74,13 +74,9 @@ class EnvTimeSeriesWaDi:
         if done:
             state = np.array([self.timeseries_states, self.timeseries_states])
         else:
-            state = self.statefnc(self.timeseries,
-                                  self.timeseries_curser,
-                                  self.timeseries_states,
-                                  action)
-        if isinstance(state, np.ndarray) and \
-           state.ndim > np.array(self.timeseries_states).ndim:
-            self.timeseries_states = state[action]
-        else:
-            self.timeseries_states = state
+            state = self.statefnc(self.timeseries, self.timeseries_curser)
+
+        self.timeseries_states = state if not isinstance(
+            state, np.ndarray) or state.ndim == np.array(self.timeseries_states).ndim \
+            else state[action]
         return state, r, done, {}
