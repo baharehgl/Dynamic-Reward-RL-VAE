@@ -1,47 +1,68 @@
+# env_wadi.py  – full-sensor version compatible with make_state()
+# -----------------------------------------------------------------
 import pandas as pd
 import numpy as np
 
+# ---------------------- default callbacks (unchanged) ------------------------
 def defaultStateFuc(timeseries, timeseries_curser, previous_state=None, action=None):
-    return timeseries['value'][timeseries_curser]
+    return timeseries.iloc[timeseries_curser]          # full row
 
 def defaultRewardFuc(timeseries, timeseries_curser, action):
     return 1 if action == timeseries['anomaly'][timeseries_curser] else -1
 
+
 class EnvTimeSeriesWaDi:
+    """
+    Minimal environment for the WADI time-series.
+    Keeps **all numeric sensor columns** so the outer RL code can slice
+    `ts[feature_cols]` without a mismatch.
+    """
+
     def __init__(self, sensor_csv, label_csv, n_steps):
-        df_sensor = pd.read_csv(sensor_csv)
-        df_label  = pd.read_csv(label_csv, header=1, low_memory=False)
-        raw       = df_label["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
-        labels    = np.where(raw==1, 0, 1)
-        L         = min(len(df_sensor), len(labels))
-        vals      = df_sensor['TOTAL_CONS_REQUIRED_FLOW'].astype(float).values[:L]
-        labels    = labels[:L]
-        ts = pd.DataFrame({
-            'value':   vals,
-            'anomaly': labels,
-            'label':   np.full(L, -1, dtype=np.int32)
-        }).astype(np.float32)
+        # ---------- 1) read sensor CSV and keep *every* numeric column -------
+        df_sensor = pd.read_csv(sensor_csv, decimal='.')
+        df_sensor.columns = df_sensor.columns.str.strip()          # trim blanks
+        df_sensor = df_sensor.apply(pd.to_numeric, errors='coerce')# coerce
+        df_sensor = df_sensor.dropna(axis=1, how='all')            # drop empty
+        df_sensor = df_sensor.dropna(axis=0, how='all').reset_index(drop=True)
+        if 'Row' in df_sensor.columns:                             # optional
+            df_sensor = df_sensor.drop(columns=['Row'])
+
+        # ---------- 2) attach ground-truth anomaly labels --------------------
+        df_label = pd.read_csv(label_csv, header=1, low_memory=False)
+        raw_lbl  = df_label["Attack LABLE (1:No Attack, -1:Attack)"] \
+                     .astype(int).values
+        anomalies = np.where(raw_lbl == 1, 0, 1)                   # 0 = normal
+
+        L = min(len(df_sensor), len(anomalies))
+        ts = df_sensor.iloc[:L].copy()
+        ts['anomaly'] = anomalies[:L]         # immutable ground truth
+        ts['label']   = -1                    # will be filled by AL / LP
+
+        # ---------- 3) store & initialise ------------------------------------
         self.timeseries_repo        = [ts]
         self.timeseries_curser_init = n_steps
         self.statefnc               = defaultStateFuc
         self.rewardfnc              = defaultRewardFuc
         self.action_space_n         = 2
 
+    # ------------------------------- RL wrappers -----------------------------
     def reset(self):
         self.timeseries        = self.timeseries_repo[0]
         self.timeseries_curser = self.timeseries_curser_init
-        self.timeseries_states = self.statefnc(self.timeseries, self.timeseries_curser)
-        self.states_list       = self.get_states_list()
+        self.timeseries_states = self.statefnc(self.timeseries,
+                                               self.timeseries_curser)
+        self.states_list       = self._precompute_states()
         return self.timeseries_states
 
-    def get_states_list(self):
+    def _precompute_states(self):
         states = []
         for c in range(self.timeseries_curser_init, len(self.timeseries)):
             if c == self.timeseries_curser_init:
                 s = self.statefnc(self.timeseries, c)
             else:
                 s = self.statefnc(self.timeseries, c, states[-1])
-                if isinstance(s, np.ndarray) and s.ndim>1:
+                if isinstance(s, np.ndarray) and s.ndim > 1:
                     s = s[0]
             states.append(s)
         return states
@@ -57,7 +78,8 @@ class EnvTimeSeriesWaDi:
                                   self.timeseries_curser,
                                   self.timeseries_states,
                                   action)
-        if isinstance(state, np.ndarray) and state.ndim>np.array(self.timeseries_states).ndim:
+        if isinstance(state, np.ndarray) and \
+           state.ndim > np.array(self.timeseries_states).ndim:
             self.timeseries_states = state[action]
         else:
             self.timeseries_states = state
