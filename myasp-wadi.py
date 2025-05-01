@@ -21,7 +21,6 @@ from collections import namedtuple
 # Custom WADI environment
 from env_wadi import EnvTimeSeriesWaDi
 
-
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 gpus = tf.config.list_physical_devices('GPU')
 print("GPUs detected by TensorFlow:", gpus)
@@ -47,34 +46,36 @@ LABEL_CSV  = os.path.join(WA_DI_DIR, 'WADI_attackdataLABLE.csv')
 
 print("=== WADI RL with dynamic reward & active learning ===\n")
 
-# ─── 1) Load numeric sensor features ────────────────────────────────────────────
+# ─── 1) Load sensor data and select numeric features ───────────────────────────
 df_all = pd.read_csv(SENSOR_CSV)
-feature_cols = df_all.select_dtypes(include=[np.number]).columns.tolist()
+# If there's an index or 'Row' column, drop it
+if 'Row' in df_all.columns:
+    df_all.drop(columns=['Row'], inplace=True)
+# Select only numeric columns (skip dates, strings)
+feature_cols = [c for c in df_all.columns if np.issubdtype(df_all[c].dtype, np.number)]
 n_features   = len(feature_cols)
 N_INPUT_DIM  = n_features + 1  # plus action bit
 print(f"Detected {n_features} numeric features; N_INPUT_DIM = {N_INPUT_DIM}\n")
 
 # ─── 2) Pretrain VAE on sampled normal windows ─────────────────────────────────
 print("Pretraining VAE on sampled normal windows...")
-# Load and map labels
 lbl_df  = pd.read_csv(LABEL_CSV, header=1, low_memory=False)
 raw_lbl = lbl_df["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
 labels  = np.where(raw_lbl == 1, 0, 1)
+# Identify normal positions (exclude first N_STEPS)
 normal_pos = np.where(labels[N_STEPS:] == 0)[0] + N_STEPS
+# Sample up to MAX_VAE_SAMPLES
 sampled    = np.random.choice(normal_pos, size=min(MAX_VAE_SAMPLES, len(normal_pos)), replace=False)
 print(f"Sampling {len(sampled)} windows for VAE training...")
-# Build windows
+# Build sliding windows
 windows = [df_all[feature_cols].iloc[i-N_STEPS+1:i+1].values.flatten() for i in sampled]
-print(f"Built {len(windows)} windows; each of length {N_STEPS * n_features}\n")
+print(f"Built {len(windows)} windows each of length {N_STEPS * n_features}\n")
 # Standardize
-def preprocess_windows(wins):
-    X  = np.array(wins, dtype='float32')
-    return StandardScaler().fit_transform(X)
-Xs = preprocess_windows(windows)
+X  = np.array(windows, dtype='float32')
+Xs = StandardScaler().fit_transform(X)
 print(f"Standardized windows shape: {Xs.shape}\n")
 
 # VAE definition
-
 def build_vae(input_dim, latent_dim=10, hidden=64):
     inp = layers.Input(shape=(input_dim,))
     h   = layers.Dense(hidden, activation='relu')(inp)
@@ -84,7 +85,6 @@ def build_vae(input_dim, latent_dim=10, hidden=64):
     z         = layers.Lambda(lambda args: args[0] + tf.exp(0.5*args[1]) * tf.random.normal(tf.shape(args[0])))([z_mean, z_log_var])
     h2  = layers.Dense(hidden, activation='relu')(z)
     out = layers.Dense(input_dim, activation='sigmoid')(h2)
-
     vae = models.Model(inp, out)
     recon = losses.mse(inp, out) * input_dim
     kl    = -0.5 * tf.reduce_sum(1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
@@ -96,7 +96,7 @@ vae = build_vae(N_STEPS * n_features)
 print(f"Fitting VAE: epochs={VAE_EPOCHS}, batch_size={VAE_BATCH}...")
 vae.fit(Xs, epochs=VAE_EPOCHS, batch_size=VAE_BATCH, verbose=1)
 vae.save('vae_wadi.h5')
-print("VAE pretraining complete; model saved to vae_wadi.h5\n")
+print("VAE pretraining complete; saved to vae_wadi.h5\n")
 
 # ─── 3) State & Reward Functions ───────────────────────────────────────────────
 def make_state(ts, c):
@@ -128,7 +128,7 @@ class QNet:
             self.loss     = tf.reduce_mean(tf.square(self.logits - self.T))
             self.train_op = tf.compat.v1.train.AdamOptimizer(lr).minimize(self.loss)
     def predict(self, s, sess): return sess.run(self.logits, {self.S: s})
-    def update (self, s,t, sess): sess.run(self.train_op, {self.S: s, self.T: t})
+    def update(self, s, t, sess): sess.run(self.train_op, {self.S: s, self.T: t})
 
 def epsilon_policy(est, nA, sess):
     def pol(obs, eps):
@@ -144,7 +144,7 @@ def copy_params(sess, src, dst):
     for s,t in zip(sorted(vs,key=lambda v:v.name), sorted(vt,key=lambda v:v.name)):
         sess.run(t.assign(s))
 
-# ─── 5) Q-Learning with dynamic reward & Active Learning ────────────────────────
+# ─── 5) Q-Learning with dynamic reward & Active Learning ───────────────────────
 def update_coef(old, ep_reward, alpha=0.001, target=0.0, lo=0.1, hi=100.0):
     new = old + alpha*(ep_reward - target)
     return max(min(new, hi), lo)
@@ -169,7 +169,9 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
     coef_history = []
 
     for ep in range(EPISODES):
+        # Initialize uncertain list each episode
         uncert = []
+
         env.statefnc  = make_state
         env.rewardfnc = lambda ts,c,a,coef=dynamic_coef: reward_fn(ts,c,a,vae_model,coef)
 
@@ -206,7 +208,7 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
             S,R,NS,_ = map(np.array, zip(*batch))
             q0 = qt.predict(NS[:,0], sess)
             q1 = qt.predict(NS[:,1], sess)
-            tgt = R + DISCOUNT_FACTOR * np.stack((q0.max(1), q1.max(1)), axis=1)
+            tgt = R + DISCOUNT_FACTOR * np.stack((q0.max(1),q1.max(1)), axis=1)
             ql.update(S, tgt, sess)
 
         copy_params(sess, ql, qt)
@@ -248,18 +250,13 @@ def train_wrapper(nLP, nAL, discount):
     sess = tf.compat.v1.Session()
     from tensorflow.compat.v1.keras import backend as K; K.set_session(sess)
 
-    # load pretrained VAE
     vae_model = load_model('vae_wadi.h5', compile=False)
-    # initialize environment & networks
     env       = EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS)
     ql, qt    = QNet('qlearn'), QNet('qtarget')
 
-    # run RL
     trained, coefs = q_learning(env, sess, ql, qt, vae_model, init_coef=20.0)
-    # validate
     f1, aupr      = validate(EnvTimeSeriesWaDi(SENSOR_CSV, LABEL_CSV, N_STEPS), sess, trained)
 
-    # plot dynamic_coef
     exp = f'exp_AL{nAL}'
     os.makedirs(os.path.join(exp,'plots'), exist_ok=True)
     plt.figure(); plt.plot(coefs); plt.title('dynamic_coef'); plt.savefig(os.path.join(exp,'plots','coef.png'))
@@ -267,3 +264,4 @@ def train_wrapper(nLP, nAL, discount):
 if __name__ == "__main__":
     for AL in [1000, 5000, 10000]:
         train_wrapper(NUM_LP, AL, discount=0.96)
+
