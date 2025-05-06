@@ -269,7 +269,7 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
         coef_history.append(dynamic_coef)
 
     return ql, coef_history
-    
+
 
 # ───────────────────────────── 6) VALIDATION ─────────────────────────────────
 def validate(env, sess, trained):
