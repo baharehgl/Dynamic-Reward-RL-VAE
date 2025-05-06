@@ -37,7 +37,7 @@ VALIDATION_SPLIT   = 0.8
 MAX_VAE_SAMPLES    = 10
 NUM_LP             = 200     # Label-Propagation budget
 NUM_AL             = 1000    # Active-Learning budget
-BATCH_SIZE         = 256
+BATCH_SIZE         = 128
 VAE_EPOCHS         = 2
 VAE_BATCH          = 32
 
@@ -188,7 +188,13 @@ def update_coef(old, ep_reward, alpha=0.001, target=0.0, lo=0.1, hi=100.0):
     new = old + alpha * (ep_reward - target)
     return max(min(new, hi), lo)
 
-
+'''
+def q_learning(env, sess, ql, qt, vae_model, init_coef):
+    Transition = namedtuple('T', ['s', 'r', 'ns', 'd'])
+    sess.run(tf.compat.v1.global_variables_initializer())
+    epss   = np.linspace(1.0, 0.1, 10000)
+    policy = epsilon_policy(ql, ACTION_SPACE_N, sess)
+'''
 def q_learning(env, sess, ql, qt, vae_model, init_coef):
     Transition = namedtuple('T', ['s', 'r', 'ns', 'd'])
     sess.run(tf.compat.v1.global_variables_initializer())
@@ -246,20 +252,24 @@ def q_learning(env, sess, ql, qt, vae_model, init_coef):
 
         # ---- Replay-memory training
         for _ in range(5):
-            batch      = random.sample(memory, BATCH_SIZE)
+            batch = random.sample(memory, BATCH_SIZE)
             S, R, NS, _ = map(np.array, zip(*batch))
-            q0 = qt.predict(NS[:, 0], sess)
-            q1 = qt.predict(NS[:, 1], sess)
-            tgt = R + DISCOUNT_FACTOR * \
-                  np.stack((q0.max(1), q1.max(1)), axis=1)
-            ql.update(S, tgt, sess)
+
+            # ---------- MODIFIED: predict only once on the single next‑state
+            q_next = qt.predict(NS, sess)  # (B, 2)
+            q_next_max = q_next.max(axis=1, keepdims=True)  # (B, 1)
+            tgt = R + DISCOUNT_FACTOR * np.repeat(q_next_max,
+                                                  ACTION_SPACE_N, axis=1)
+            # ----------------------------------------------------------------
+
+            ql.update(S, tgt.astype(np.float32), sess)
 
         copy_params(sess, ql, qt)
         dynamic_coef = update_coef(dynamic_coef, ep_reward)
         coef_history.append(dynamic_coef)
 
     return ql, coef_history
-
+    
 
 # ───────────────────────────── 6) VALIDATION ─────────────────────────────────
 def validate(env, sess, trained):
