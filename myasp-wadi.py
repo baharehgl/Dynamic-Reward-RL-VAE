@@ -156,7 +156,7 @@ def train(sess, NUM_AL):
 
         # ----- Replay blocking ----------------------------------------
         for _ in range(5):
-            batch random.sample(memory,min(BATCH_SIZE,len(memory)))
+            batch = random.sample(memory,min(BATCH_SIZE,len(memory)))
             S,R,NS,_ = map(np.array, zip(*batch))
             qn = qt.predict(NS,sess)
             tgt = R + DISCOUNT*np.repeat(qn.max(1,keepdims=True),2,1)
