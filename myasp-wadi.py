@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# wadi_rl_equal_al.py
+
 import os, random, numpy as np, pandas as pd, tensorflow as tf
 from collections import namedtuple
 tf.compat.v1.disable_eager_execution()
