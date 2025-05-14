@@ -105,7 +105,7 @@ import matplotlib.pyplot as plt
 from env_wadi import EnvTimeSeriesWaDi
 
 # hyperparams
-EPISODES   = 30
+EPISODES   = 10
 BATCH_SIZE = 128
 DISCOUNT   = 0.5
 TN,TP,FP,FN= 1,10,-1,-10
