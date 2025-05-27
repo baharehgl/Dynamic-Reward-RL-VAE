@@ -16,7 +16,7 @@ df = pd.read_csv(SENSOR, decimal='.')
 df = df.iloc[::2].reset_index(drop=True)
 df.columns = df.columns.str.strip()
 df = df.apply(pd.to_numeric, errors='coerce')\
-       .dropna(axis=1,'all').dropna(axis=0,'all').reset_index(drop=True)
+       .dropna(axis=1, how='all').dropna(axis=0, how='all').reset_index(drop=True)
 if 'Row' in df.columns: df = df.drop(columns=['Row'])
 feature_cols = df.columns.tolist()
 n_features   = len(feature_cols)
@@ -85,8 +85,8 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from env_wadi import EnvTimeSeriesWaDi
 
-# Hyperparams (tuned down)
-EPISODES   = 10
+# Hyperparams
+EPISODES   = 3
 BATCH_SIZE = 128
 DISCOUNT   = 0.5
 TN,TP,FP,FN= 1,10,-1,-10
