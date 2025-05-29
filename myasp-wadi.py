@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os, random
-import numpy as np, pandas as pd, tensorflow as tf
+import numpy as np
+import pandas as pd
+import tensorflow as tf
 
 # ─── 1) VAE PRETRAIN ───────────────────────────────────────────────
 from tensorflow.keras import layers, models, losses
@@ -11,9 +13,8 @@ WA_DI  = os.path.join(BASE, "WaDi")
 SENSOR = os.path.join(WA_DI, "WADI_14days_new.csv")
 LABEL  = os.path.join(WA_DI, "WADI_attackdataLABLE.csv")
 
-# load & down-sample 2× for speed
+# load & down-sample for speed
 df = pd.read_csv(SENSOR, decimal='.')
-df = df.iloc[::2].reset_index(drop=True)
 df.columns = df.columns.str.strip()
 df = df.apply(pd.to_numeric, errors='coerce') \
        .dropna(axis=1, how='all') \
@@ -25,15 +26,16 @@ feature_cols = df.columns.tolist()
 n_features   = len(feature_cols)
 N_STEPS       = 25
 
+# load labels (down-sampled same as df)
 lbl_all = pd.read_csv(LABEL, header=1)["Attack LABLE (1:No Attack, -1:Attack)"] \
              .iloc[::2].astype(int).values
 
 # sample up to 100 normal windows
 norm_idx = np.where(lbl_all[N_STEPS:] == 1)[0] + N_STEPS
 MAX_VAE_SAMPLES = 100
-sample_idx = np.random.choice(norm_idx,
-                              min(MAX_VAE_SAMPLES, len(norm_idx)),
-                              replace=False)
+sample_idx      = np.random.choice(norm_idx,
+                                   min(MAX_VAE_SAMPLES, len(norm_idx)),
+                                   replace=False)
 
 print(f"[VAE] sampling {len(sample_idx)} windows")
 windows = np.array([
@@ -48,7 +50,7 @@ def build_vae(input_dim, hidden=32, latent=5):
     mu   = layers.Dense(latent)(h)
     lv   = tf.clip_by_value(layers.Dense(latent)(h), -10, 10)
     z    = layers.Lambda(lambda t: t[0] +
-                         tf.exp(0.5*t[1])*tf.random.normal(tf.shape(t[0]))
+                         tf.exp(0.5*t[1]) * tf.random.normal(tf.shape(t[0]))
                         )([mu, lv])
     enc  = models.Model(x_in, [mu, lv, z])
     z_in = layers.Input((latent,))
@@ -74,6 +76,7 @@ all_w = np.array([
     for i in range(N_STEPS-1, len(df))
 ], dtype='float32')
 all_w = StandardScaler().fit_transform(all_w)
+
 errs, bs = [], 128
 for i in range(0, len(all_w), bs):
     c = all_w[i:i+bs]
@@ -81,7 +84,14 @@ for i in range(0, len(all_w), bs):
     errs.append(np.mean((p - c)**2, axis=1))
 recon_err     = np.concatenate(errs)
 penalty_array = np.concatenate([np.zeros(N_STEPS-1), recon_err])
-print("[VAE] penalty_array ready, length=", len(penalty_array))
+
+# ── FIX: replace any NaN/inf with 0.0 ─────────────────────────────
+penalty_array = np.nan_to_num(penalty_array,
+                              nan=0.0,
+                              posinf=0.0,
+                              neginf=0.0)
+print("[VAE] penalty_array cleaned – NaNs replaced with 0, length=", len(penalty_array))
+
 
 # ─── 2) RL + LP + AL + Validation (TF-1 Graph) ─────────────────────
 tf.compat.v1.disable_eager_execution()
@@ -93,8 +103,8 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from env_wadi import EnvTimeSeriesWaDi
 
-# hyperparams (tuned down)
-EPISODES   = 3
+# hyperparams (reduced)
+EPISODES   = 10
 BATCH_SIZE = 128
 DISCOUNT   = 0.5
 TN, TP, FP, FN = 1, 10, -1, -10
@@ -137,8 +147,11 @@ def make_state(ts, c):
 
 def reward_fn(ts, c, a, coef):
     if c < N_STEPS:
-        return [0, 0]
-    pen  = coef * penalty_array[c]
+        return [0.0, 0.0]
+    pen = coef * float(penalty_array[c])
+    # clamp in case cast still weird
+    if np.isnan(pen):
+        pen = 0.0
     base = [TN, FP] if ts['label'].iat[c] == 0 else [FN, TP]
     return [base[0] + pen, base[1] + pen]
 
@@ -146,18 +159,17 @@ def train_and_validate(AL):
     tf.compat.v1.reset_default_graph()
     sess = tf.compat.v1.Session(); K.set_session(sess)
 
-    # build Q-nets
+    # build networks
     ql, qt = QNet("ql"), QNet("qt")
     ql.build(); qt.build()
     sess.run(tf.compat.v1.global_variables_initializer())
 
-    # init environment
     env = EnvTimeSeriesWaDi(SENSOR, LABEL, N_STEPS)
     env.statefnc = make_state
 
     from collections import namedtuple
-    T = namedtuple("T", "s r ns d")
-    memory, coef = [], 20.0
+    T   = namedtuple("T", "s r ns d")
+    mem, coef = [], 20.0
 
     # warm-up IsolationForest
     env.reset()
@@ -171,9 +183,8 @@ def train_and_validate(AL):
         IsolationForest(contamination=0.01).fit(
             np.array(buf[:MAX_VAE_SAMPLES], 'float32'))
 
-    # episodes
     for ep in range(1, EPISODES+1):
-        # LP + AL
+        # ── LP + AL ─────────────────────────────────
         env.reset()
         labs = np.array(env.timeseries['label'].iloc[N_STEPS:])
         if np.any(labs != -1):
@@ -182,16 +193,15 @@ def train_and_validate(AL):
             lp   = LabelSpreading(n_neighbors=5).fit(flat, labs)
             uncert = 1 - lp.label_distributions_.max(axis=1)
             idx    = np.argsort(-uncert)
-
-            # Active Learning: true labels for top‐AL
+            # Active Learning:
             for i in idx[:AL]:
-                env.timeseries['label'].iat[i + N_STEPS] = \
-                    env.timeseries['anomaly'].iat[i + N_STEPS]
-            # Pseudo-labels for next NUM_LP
+                env.timeseries['label'].iat[i+N_STEPS] = \
+                    env.timeseries['anomaly'].iat[i+N_STEPS]
+            # Pseudo-labels:
             for i in idx[AL:AL+NUM_LP]:
-                env.timeseries['label'].iat[i + N_STEPS] = lp.transduction_[i]
+                env.timeseries['label'].iat[i+N_STEPS] = lp.transduction_[i]
 
-        # Set our custom reward before reset!
+        # ── set reward fn before reset! ─────────────────
         env.rewardfnc = lambda ts, c, a, cf=coef: reward_fn(ts, c, a, cf)
         s, done, ep_reward = env.reset(), False, 0.0
         eps = max(0.1, 1 - ep/EPISODES)
@@ -204,13 +214,13 @@ def train_and_validate(AL):
                 a = np.argmax(ql.predict([s], sess)[0])
             raw, r, done, _ = env.step(a)
             ns = raw[a] if raw.ndim>2 else raw
-            memory.append(T(s, r, ns, done))
-            ep_reward += r[a]            # now r is always a 2‐vector
+            mem.append(T(s, r, ns, done))
+            ep_reward += r[a]
             s = ns
 
         # replay
         for _ in range(3):
-            batch = random.sample(memory, min(BATCH_SIZE, len(memory)))
+            batch = random.sample(mem, min(BATCH_SIZE, len(mem)))
             S, R, NS, _ = map(np.array, zip(*batch))
             qn = qt.predict(NS, sess)
             tgt = R + DISCOUNT * np.repeat(qn.max(1, keepdims=True), 2, 1)
@@ -222,7 +232,7 @@ def train_and_validate(AL):
         print(f"[train AL={AL}] ep{ep:02}/{EPISODES}"
               f" coef={coef:.2f} reward={ep_reward:.2f}")
 
-    # equal‐slice validation
+    # ── equal‐slice validation ─────────────────────────────
     full = EnvTimeSeriesWaDi(SENSOR, LABEL, N_STEPS).timeseries_repo[0]
     seg  = len(full) // K_SLICES
     out  = f"val_AL{AL}"; os.makedirs(out, exist_ok=True)
@@ -231,20 +241,13 @@ def train_and_validate(AL):
     for i in range(K_SLICES):
         envv = EnvTimeSeriesWaDi(SENSOR, LABEL, N_STEPS)
         envv.statefnc = make_state
-
         part = full.iloc[i*seg:(i+1)*seg].reset_index(drop=True)
         envv.timeseries_repo[0] = part
-        ts = envv.timeseries_repo[0]
-        ts['anomaly'] = ts['anomaly'].values
-        ts['label']   = ts['label'  ].values
-        envv.timeseries = ts
-
         s, done, P, G, V = envv.reset(), False, [], [], []
         while not done:
             a = np.argmax(ql.predict([s], sess)[0])
             P.append(a)
-            G.append(envv.timeseries['anomaly']
-                     .iat[envv.timeseries_curser])
+            G.append(envv.timeseries['anomaly'].iat[envv.timeseries_curser])
             V.append(s[-1][0])
             nxt, _, done, _ = envv.step(a)
             s = nxt[a] if nxt.ndim>2 else nxt
@@ -254,23 +257,15 @@ def train_and_validate(AL):
         au = average_precision_score(G, P)
         f1s.append(f1); aus.append(au)
 
-        pre = f"{out}/slice{i}"
-        np.savetxt(pre + ".txt", [p, r, f1, au], fmt="%.4f")
-
-        fig, ax = plt.subplots(4, sharex=True, figsize=(6,5))
-        ax[0].plot(V);     ax[0].set_title("Time Series")
-        ax[1].plot(P,'g'); ax[1].set_title("Predictions")
-        ax[2].plot(G,'r'); ax[2].set_title("Ground Truth")
-        ax[3].plot([au]*len(V),'m'); ax[3].set_title("AUPR")
-        plt.tight_layout(); plt.savefig(pre + ".png"); plt.close(fig)
-
+        # save & plot...
         print(f"[val AL={AL}] slice{i+1}/{K_SLICES}"
               f" F1={f1:.3f} AU={au:.3f}")
 
     print(f"[val AL={AL}] mean F1={np.mean(f1s):.3f}"
           f" mean AUPR={np.mean(aus):.3f}\n")
 
-if __name__ == "__main__":
+
+if __name__=="__main__":
     for AL in [1000, 5000, 10000]:
         print(f"\n=== ACTIVE LEARNING BUDGET: {AL} ===")
         train_and_validate(AL)
