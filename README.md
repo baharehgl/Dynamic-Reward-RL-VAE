@@ -1,4 +1,4 @@
-# Dynamic Reward RL‐VAE
+# Dynamic Reward Scaling for Reinforcement Learning in Time Series Anomaly Detection
 
 <div align="center">
   <img
