@@ -2,9 +2,9 @@
 
 <div align="center">
   <img
-    src="figure/proposed_method_dynamic_reward.png"
+    src="Figure/proposed_method_dynamic_reward.png"
     width="800"
-    height="300"
+    height="350"
     alt="Proposed Figure">
 </div>
 
@@ -58,37 +58,37 @@ source .venv/bin/activate    # macOS/Linux
 # .venv\Scripts\activate     # Windows
 pip install --upgrade pip
 pip install -r requirements.txt
-```````
+```
 
 ## Usage
 ```bash
 All commands assume your virtual environment is active and you are in the repository root.
 Replace DATASET with one of: yahoo_a1, yahoo_a2, smd, or wadi.
-```````
+```
 
-## Train VAE
+### 1-Train VAE
 ```bash
 python scripts/train_vae.py \
   --data_dir data/DATASET/ \
   --output_dir models/vae/
 Trains on “normal” windows and saves encoder/decoder weights to models/vae/.
-```````
-## 2- Warm‐up Replay Memory
+```
+### 2-Warm‐up Replay Memory
 ```bash
 python scripts/warmup_replay.py \
   --data_dir data/DATASET/ \
   --vae_model_dir models/vae/ \
   --output_replay replay_memory.pkl
-```````
-## 3- Train RL Agent
+```
+### 3-Train RL Agent
 ```bash
 python scripts/train_rl.py \
   --data_dir data/DATASET/ \
   --vae_model_dir models/vae/ \
   --replay_path replay_memory.pkl \
   --output_dir models/dqn/
-```````
-## 4- Evaluate & Visualize
+```
+### 4-Evaluate & Visualize
 ```bash
 python scripts/evaluate.py \
   --data_dir data/DATASET/ \
@@ -98,7 +98,7 @@ python scripts/evaluate.py \
 python scripts/visualize_results.py \
   --log_dir models/dqn/ \
   --output_dir results/plots/
-```````
+```
 ## Repository Structure
 ```bash
 Dynamic-Reward-RL-VAE/
@@ -129,17 +129,17 @@ Dynamic-Reward-RL-VAE/
 ├── requirements.txt
 ├── LICENSE
 └── README.md
-```````
-
+```
+<!--
 ## Paper
-```bash
+```
 Dynamic Reward Scaling for Reinforcement Learning in Time Series Anomaly Detection
 ICML 2025.
 Download the full PDF here.
-```````
+```
 
 ## Citation
-```bash
+```
 @inproceedings{golchin2025dynamic,
   title        = {Dynamic Reward Scaling for Reinforcement Learning in Time Series Anomaly Detection},
   author       = {Golchin, Bahareh and Rekabdar, Banafsheh and Liu, Kunpeng},
@@ -147,4 +147,5 @@ Download the full PDF here.
   year         = {2025},
   note         = {Code: \url{https://github.com/baharehgl/Dynamic-Reward-RL-VAE}}
 }
-```````
+```
+-->
