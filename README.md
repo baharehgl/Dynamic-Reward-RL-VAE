@@ -3,8 +3,8 @@
 <div align="center">
   <img
     src="Figure/proposed_method_dynamic_reward.png"
-    width="800"
-    height="350"
+    width="600"
+    height="250"
     alt="Proposed Figure">
 </div>
 
