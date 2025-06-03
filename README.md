@@ -38,13 +38,14 @@ Supported benchmarks:
 - **WaDi (Water Distribution Dataset)**
 
 Place raw CSV files under:
+```bash
 data/
 ├── yahoo_a1/
 ├── yahoo_a2/
 ├── smd/
 └── wadi/
-
-Scripts automatically handle sliding‐window extraction (e.g., `window_size = 50`) and normalization.
+```
+Scripts automatically handle sliding window extraction (e.g., `window_size = 50`) and normalization.
 
 ---
 
