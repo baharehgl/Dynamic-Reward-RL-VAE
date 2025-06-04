@@ -90,7 +90,7 @@ all_windows = np.array([
 scaler_full = StandardScaler().fit(all_windows)
 all_windows_scaled = scaler_full.transform(all_windows)
 
-batch_size = 128
+batch_size = 64
 errs = []
 for i in range(0, len(all_windows_scaled), batch_size):
     chunk = all_windows_scaled[i : i + batch_size]
@@ -118,7 +118,7 @@ from env_wadi import EnvTimeSeriesWaDi
 
 # ── Hyperparameters ─────────────────────────────────────────────────────────
 EPISODES   = 10      # increased from 3 → 50
-BATCH_SIZE = 128
+BATCH_SIZE = 64
 DISCOUNT   = 0.5
 TN, TP, FP, FN = 1, 10, -1, -10
 
