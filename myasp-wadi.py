@@ -5,83 +5,91 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-# ─── 1) PRE‐TRAIN VAE IN EAGER MODE ─────────────────────────────────
+# ─── 1) PRETRAIN VAE IN EAGER MODE ────────────────────────────────────
 from tensorflow.keras import layers, models, losses
 from sklearn.preprocessing import StandardScaler
 
-# file paths (assume this script lives next to the WaDi folder)
+# ─── Paths ────────────────────────────────────────────────────────────
 BASE   = os.path.dirname(__file__)
 WA_DI  = os.path.join(BASE, "WaDi")
 SENSOR = os.path.join(WA_DI, "WADI_14days_new.csv")
 LABEL  = os.path.join(WA_DI, "WADI_attackdataLABLE.csv")
 
-# ─── A) Load & clean the entire sensor DataFrame ───────────────────────
+# ─── A) Load & clean the sensor CSV ───────────────────────────────────
 df = pd.read_csv(SENSOR, decimal='.')
 df.columns = df.columns.str.strip()
 
-# Convert non‐numeric → NaN, then drop columns that are ALL NaN, then drop rows that are ALL NaN
+# Convert everything to numeric; drop any column that becomes all-NaN, then drop any row that becomes all-NaN.
 df = df.apply(pd.to_numeric, errors='coerce')
 df = df.dropna(axis=1, how='all')
 df = df.dropna(axis=0, how='all').reset_index(drop=True)
+
+# Drop an optional “Row” column if present
 if 'Row' in df.columns:
     df = df.drop(columns=['Row'])
 
-feature_cols = df.columns.tolist()
-n_features   = len(feature_cols)
-print(f"[DATA] Kept {n_features} numeric sensor columns.")
+print(f"[DATA] After cleaning, {len(df.columns)} numeric columns remain, {len(df)} rows total.")
 
-# ─── B) Load attack labels and align to df length ──────────────────────
-lbl_all = pd.read_csv(LABEL, header=1)["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
-lbl_all = lbl_all[: len(df)]  # trim to match cleaned df length
-# Convert “1 → 0 (normal), −1 → 1 (attack)”
-anomaly = np.where(lbl_all == 1, 0, 1)
+# ─── B) Load the attack‐label CSV (might be shorter) ─────────────────
+lbl_df   = pd.read_csv(LABEL, header=1, low_memory=False)
+raw_lbl  = lbl_df["Attack LABLE (1:No Attack, -1:Attack)"].astype(int).values
+anomaly_full = np.where(raw_lbl == 1, 0, 1)  # 1→0 normal, -1→1 anomaly
 
-# ─── C) Build a single timeseries DataFrame that RL will use ──────────
-# We keep all numeric columns, plus an “anomaly” column, plus a “label” column (initialized to −1)
+# Truncate sensor df and label array to the same minimum length
+min_len = min(len(df), len(anomaly_full))
+df       = df.iloc[:min_len].reset_index(drop=True)
+anomaly  = anomaly_full[:min_len]
+print(f"[DATA] Truncated both data and labels to length = {min_len}.")
+
+# ─── C) Build the full timeseries DataFrame for RL ───────────────────
 TS = df.copy()
 TS["anomaly"] = anomaly
 TS["label"]   = -1
-print(f"[DATA] Final timeseries shape = {TS.shape}  (features + anomaly + label)")
+print(f"[DATA] Final TS.shape = {TS.shape} (features + anomaly + label).")
 
-# ─── D) Sample “normal” windows for VAE pre‐training ──────────────────
-N_STEPS        = 25
+# Keep a list of feature‐column names (all numeric columns)
+feature_cols_full = df.columns.tolist()
+
+# ─── D) Sample “normal” windows (anomaly==0) for VAE pretraining ─────
+N_STEPS         = 25
 MAX_VAE_SAMPLES = 200
 
-# Identify all indices i ≥ N_STEPS such that anomaly[i] == 0
-normal_idx = np.where((TS["anomaly"].values[N_STEPS:] == 0))[0] + N_STEPS
+normal_idx = np.where(TS["anomaly"].values[N_STEPS:] == 0)[0] + N_STEPS
 sample_idx = np.random.choice(
     normal_idx,
     size=min(MAX_VAE_SAMPLES, len(normal_idx)),
     replace=False
 )
-print(f"[VAE] Sampling {len(sample_idx)} normal windows of length {N_STEPS}")
+print(f"[VAE] Sampling {len(sample_idx)} normal windows of length {N_STEPS}.")
 
-# Build “windows” array of shape (num_samples, N_STEPS * n_features)
+# Build a (num_samples × (N_STEPS·n_features)) array
 windows = np.array([
-    TS.iloc[i - N_STEPS + 1 : i + 1][feature_cols].values.flatten()
+    TS.iloc[i - N_STEPS + 1 : i + 1][feature_cols_full].values.flatten()
     for i in sample_idx
 ], dtype="float32")
 
-# If any column in “windows” has zero variance → drop that feature entirely
-# (otherwise StandardScaler.scale_ would be zero → future division by zero).
+# Drop any column that has zero variance across these sampled windows
 col_std = windows.std(axis=0)
 zero_std_cols = np.where(col_std == 0)[0]
 if len(zero_std_cols) > 0:
-    print(f"[VAE] Dropping {len(zero_std_cols)} zero‐variance features (across sampled windows).")
+    print(f"[VAE] Dropping {len(zero_std_cols)} constant columns.")
     keep_mask = col_std > 0
     windows = windows[:, keep_mask]
-    feature_cols = [f for (i, f) in enumerate(feature_cols) if keep_mask[i]]
-    n_features = len(feature_cols)
-    print(f"[VAE] Now using {n_features} features (all non‐constant).")
+    feature_cols = [feature_cols_full[i] for i in range(len(feature_cols_full)) if keep_mask[i]]
+    n_features   = len(feature_cols)
+    print(f"[VAE] Remaining features after drop = {n_features}")
+else:
+    feature_cols = feature_cols_full.copy()
+    n_features   = len(feature_cols_full)
+    print(f"[VAE] Using all {n_features} features (none were constant).")
 
-# Fit a single StandardScaler on those sampled windows → ALWAYS reuse this scaler
+# Standardize those sampled windows
 scaler = StandardScaler().fit(windows)
 Xs     = scaler.transform(windows)
 print(f"[VAE] Training tensor shape = {Xs.shape}")
 
-# ─── E) Build the VAE (in eager/TensorFlow‐2 style) ───────────────────
+# ─── E) Build & pretrain the VAE (TF‐2/Eager) ─────────────────────────
 def build_vae(input_dim, hidden=64, latent=10):
-    # Encoder
     x_in = layers.Input((input_dim,))
     h    = layers.Dense(hidden, activation="relu")(x_in)
     z_mu = layers.Dense(latent)(h)
@@ -91,13 +99,11 @@ def build_vae(input_dim, hidden=64, latent=10):
     )([z_mu, z_lv])
     encoder = models.Model(x_in, [z_mu, z_lv, z], name="encoder")
 
-    # Decoder
     z_in  = layers.Input((latent,))
     dh    = layers.Dense(hidden, activation="relu")(z_in)
     x_out = layers.Dense(input_dim, activation="sigmoid")(dh)
     decoder = models.Model(z_in, x_out, name="decoder")
 
-    # VAE = encoder → decoder
     recon = decoder(z)
     vae   = models.Model(x_in, recon, name="vae")
     rl = losses.mse(x_in, recon) * input_dim
@@ -109,21 +115,17 @@ def build_vae(input_dim, hidden=64, latent=10):
 vae, encoder, decoder = build_vae(N_STEPS * n_features)
 vae.summary()
 
-# Train for just 2 epochs (you can increase if you have time/memory)
 vae.fit(Xs, epochs=2, batch_size=32, verbose=1)
 print("[VAE] Pretraining complete")
 
-# ─── F) Compute “penalty_array” = per‐step reconstruction‐error for EVERY sliding window ──
+# ─── F) Compute the per‐step reconstruction error array ────────────────
 print("[VAE] Computing per‐step reconstruction error")
 all_windows = np.array([
     TS.iloc[i - N_STEPS + 1 : i + 1][feature_cols].values.flatten()
     for i in range(N_STEPS - 1, len(TS))
 ], dtype="float32")
 
-# Re‐use the SAME scaler to avoid ANY overflow / divide‐by‐zero
 all_windows_scaled = scaler.transform(all_windows)
-
-# Predict in small batches to avoid OOM
 batch_size = 64
 errs = []
 for start in range(0, len(all_windows_scaled), batch_size):
@@ -133,9 +135,9 @@ for start in range(0, len(all_windows_scaled), batch_size):
 
 recon_err = np.concatenate(errs, axis=0)
 penalty_array = np.concatenate([np.zeros(N_STEPS - 1), recon_err])
-print(f"[VAE] Penalty array length = {len(penalty_array)}")
-print(f"[VAE] raw penalty stats: min={np.nanmin(penalty_array):.4e}, max={np.nanmax(penalty_array):.4e}, "
-      f"mean={np.nanmean(penalty_array):.4e}")
+print(f"[VAE] Penalty array length = {len(penalty_array)}  ")
+print(f"[VAE] raw penalty stats: min={np.nanmin(penalty_array):.4e}, "
+      f"max={np.nanmax(penalty_array):.4e}, mean={np.nanmean(penalty_array):.4e}")
 
 # ─── 2) RL TRAINING & VALIDATION IN TF‐1 GRAPH ─────────────────────────
 tf.compat.v1.disable_eager_execution()
@@ -147,56 +149,44 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ─── We will embed the environment right here ─────────────────────────
+# ─── Environment “wrapper” over TS DataFrame ──────────────────────────
 class EnvWaDi:
     """
-    A simple time‐series environment that holds the entire TS DataFrame (with all features).
-    At reset(), we start at t = N_STEPS.  Each step(action) moves t→t+1,
-    returns a new “state” = two possible windows (action=0 or action=1),
-    a reward vector [r0, r1], and done when t reaches end.
-
-    We store:
-      • timeseries   = DataFrame with columns = feature_cols + ['anomaly','label']
-      • t            = integer cursor (starts at N_STEPS)
-      • statefnc     = user‐supplied function(ts, cursor)
-      • rewardfnc    = user‐supplied function(ts, cursor, action)
-      • states_list  = list of all states (used by LP/AL before each episode)
+    At reset(), cursor t=N_STEPS.  Each step(action) → t+1.
+    Returns next state = two (N_STEPS×(n_features+1)) arrays (one for action=0, one for action=1),
+    reward = [r0, r1], done flag.
     """
     def __init__(self, timeseries_df, statefnc, rewardfnc):
-        self.timeseries       = timeseries_df.copy().reset_index(drop=True)
-        self.N                = len(timeseries_df)
-        self.statefnc        = statefnc
-        self.rewardfnc       = rewardfnc
-        self.t0               = N_STEPS
-        self.action_space_n   = 2
+        self.timeseries     = timeseries_df.copy().reset_index(drop=True)
+        self.N              = len(timeseries_df)
+        self.statefnc      = statefnc
+        self.rewardfnc     = rewardfnc
+        self.t0             = N_STEPS
+        self.action_space_n = 2
 
     def reset(self):
         self.t = self.t0
-        # Precompute states_list from t0→end
+        # Precompute states_list (flattened “action=0” slices) for LP/AL
         self.states_list = []
         for c in range(self.t0, self.N):
             s = self.statefnc(self.timeseries, c)
             if s is not None:
-                # For RL we store just the “two‐window” array, not whether action dimension
-                self.states_list.append(s[0])  # store the “a=0” window for LP/AL flattening
+                # store only the action=0 window, flattened
+                self.states_list.append(s[0].flatten())
         return self.statefnc(self.timeseries, self.t)
 
     def step(self, action):
-        # Compute reward for the current cursor
         r = self.rewardfnc(self.timeseries, self.t, action)
         self.t += 1
         done = int(self.t >= self.N)
-
         if not done:
             s_next = self.statefnc(self.timeseries, self.t)
         else:
-            # At the final step, just repeat the last state so shapes match
-            last_state = self.statefnc(self.timeseries, self.N - 1)
-            s_next = last_state
-
+            # If done, repeat last valid state so shapes match:
+            s_next = self.statefnc(self.timeseries, self.N - 1)
         return s_next, r, done, {}
 
-# ─── Q‐Network (TF1‐style) ────────────────────────────────────────────
+# ─── Q‐Network (TF‐1 style) ────────────────────────────────────────────
 class QNet:
     def __init__(self, scope):
         self.sc = scope
@@ -210,8 +200,8 @@ class QNet:
                 tf.compat.v1.unstack(self.S, N_STEPS, axis=1),
                 dtype=tf.float32
             )
-            self.Q     = layers.Dense(2)(seq[-1])
-            self.loss  = tf.reduce_mean(tf.square(self.Q - self.T))
+            self.Q    = layers.Dense(2)(seq[-1])
+            self.loss = tf.reduce_mean(tf.square(self.Q - self.T))
             self.train = tf.compat.v1.train.AdamOptimizer(3e-4).minimize(self.loss)
 
     def predict(self, x, sess):
@@ -226,7 +216,7 @@ def copy_params(sess, src: QNet, dst: QNet):
     for s_var, d_var in zip(sorted(sv, key=lambda v: v.name), sorted(dv, key=lambda v: v.name)):
         sess.run(d_var.assign(s_var))
 
-# ─── State & Reward using the precomputed penalty_array ─────────────
+# ─── State & Reward using penalty_array ───────────────────────────────
 def make_state(ts_df, c):
     if c < N_STEPS:
         return None
@@ -249,19 +239,17 @@ def train_and_validate(AL_budget):
     sess = tf.compat.v1.Session()
     K.set_session(sess)
 
-    # Build two Q‐networks (qlearn & qtarget)
+    # Build Q‐networks
     ql = QNet("ql"); ql.build()
     qt = QNet("qt"); qt.build()
     sess.run(tf.compat.v1.global_variables_initializer())
 
-    # Initialize environment, using our “TS” DataFrame
-    # Note: we’ll always feed the same TS, but its “label” column will be updated by LP/AL.
-    env = EnvWaDi(TS, make_state, lambda ts, c, a: [0.0, 0.0])
+    env = EnvWaDi(TS, make_state, lambda ts, cc, aa: [0.0, 0.0])
     from collections import namedtuple
     Transition = namedtuple("T", ["s", "r", "ns", "d"])
     memory, coef = [], 20.0
 
-    # Optional warm‐up IsolationForest
+    # Optional warm‐up IsolationForest on known‐normal segments
     W0 = []
     env.reset()
     for ii in range(N_STEPS, len(env.timeseries)):
@@ -271,27 +259,23 @@ def train_and_validate(AL_budget):
         from sklearn.ensemble import IsolationForest
         IsolationForest(contamination=0.01).fit(np.array(W0[:MAX_VAE_SAMPLES], dtype="float32"))
 
-    # ─── RL EPISODES ─────────────────────────────────────────────────────
+    # ─── RL EPISODES ───────────────────────────────────────────────────
     for ep in range(1, EPISODES + 1):
-        # 1) Label‐Propagation + Active Learning before rolling out
+        # 1) Label‐Propagation + Active Learning before rollout
         env.reset()
         labs = np.array(env.timeseries["label"].iloc[N_STEPS :])
         if np.any(labs != -1):
-            # Build the feature matrix for LP: flatten each stored “a0” window
-            Warr = np.array(env.states_list)  # shape = (num_windows, N_STEPS*(n_features+1))
+            Warr = np.array(env.states_list)  # each element = flattened “action=0” window
             flat = Warr.reshape(Warr.shape[0], -1)
             lp   = LabelSpreading(kernel="knn", n_neighbors=10).fit(flat, labs)
-            # “Uncertainty” = 1 − max‐prob
             uncert = 1.0 - lp.label_distributions_.max(axis=1)
             idx    = np.argsort(-uncert)
-            # First AL_budget → set true anomaly label
             for i in idx[:AL_budget]:
                 env.timeseries["label"].iat[i + N_STEPS] = env.timeseries["anomaly"].iat[i + N_STEPS]
-            # Next NUM_LP → set LP’s pseudo‐label
             for i in idx[AL_budget : AL_budget + NUM_LP]:
                 env.timeseries["label"].iat[i + N_STEPS] = lp.transduction_[i]
 
-        # 2) Rollout with ε‐greedy policy
+        # 2) Rollout with ε‐greedy, storing in memory
         env.rewardfnc = lambda ts, cc, aa: reward_fn(ts, cc, aa, coef)
         s, done = env.reset(), False
         eps     = max(0.1, 1.0 - float(ep) / EPISODES)
@@ -309,24 +293,23 @@ def train_and_validate(AL_budget):
             ep_reward += float(r[a])
             s = ns
 
-        # 3) Replay‐memory updates (5 gradient steps)
+        # 3) Replay updates (5 gradient steps)
         for _ in range(5):
             batch = random.sample(memory, min(BATCH_SIZE, len(memory)))
             S_batch, R_batch, NS_batch, _ = map(np.array, zip(*batch))
 
-            qn      = qt.predict(NS_batch, sess)
-            qn_max  = np.max(qn, axis=1, keepdims=True)
-            tgt     = R_batch + DISCOUNT * np.repeat(qn_max, 2, axis=1)
+            qn     = qt.predict(NS_batch, sess)
+            qn_max = np.max(qn, axis=1, keepdims=True)
+            tgt    = R_batch + DISCOUNT * np.repeat(qn_max, 2, axis=1)
             ql.update(S_batch, tgt.astype("float32"), sess)
 
         copy_params(sess, ql, qt)
 
         # 4) Update the dynamic‐reward coefficient
         coef = max(min(coef + 0.001 * ep_reward, 10.0), 0.1)
-        print(f"[train AL={AL_budget}] ep{ep:02d}/{EPISODES} coef={coef:.2f}  reward={ep_reward:.2f}")
+        print(f"[train AL={AL_budget}] ep{ep:02d}/{EPISODES}  coef={coef:.2f}  reward={ep_reward:.2f}")
 
-    # ─── Equal‐slice validation ─────────────────────────────────────────
-    # We take K_SLICES disjoint chunks of TS; each chunk is its own mini‐episode.
+    # ─── Equal‐slice validation ────────────────────────────────────────
     base_ts = TS.copy()
     seg     = len(base_ts) // K_SLICES
     outdir  = f"validation_AL{AL_budget}"
@@ -334,7 +317,8 @@ def train_and_validate(AL_budget):
     f1s, aus = [], []
 
     for i in range(K_SLICES):
-        envv = EnvWaDi(base_ts.iloc[i * seg : (i + 1) * seg].reset_index(drop=True), make_state, lambda ts, cc, aa: [0.0, 0.0])
+        chunk_df = base_ts.iloc[i * seg : (i + 1) * seg].reset_index(drop=True)
+        envv = EnvWaDi(chunk_df, make_state, lambda ts, cc, aa: [0.0, 0.0])
         s, done = envv.reset(), False
         P, G, V = [], [], []
 
@@ -359,18 +343,18 @@ def train_and_validate(AL_budget):
         ax[3].plot([au] * len(V), "m"); ax[3].set_title("AUPR")
         plt.tight_layout(); plt.savefig(prefix + ".png"); plt.close(fig)
 
-        print(f"[val AL={AL_budget}] slice{i+1}/{K_SLICES}  F1={f1:.3f}  AU={au:.3f}")
+        print(f"[val AL={AL_budget}] slice {i+1}/{K_SLICES}   F1={f1:.3f}   AU={au:.3f}")
 
-    print(f"[val AL={AL_budget}] mean F1={np.mean(f1s):.3f}  mean AUPR={np.mean(aus):.3f}\n")
+    print(f"[val AL={AL_budget}] mean F1={np.mean(f1s):.3f}   mean AUPR={np.mean(aus):.3f}\n")
 
 
 # ─── DRIVER LOOP ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Hyperparameters (you can lower EPISODES or BATCH_SIZE to run faster)
+    # (You can lower these if you want shorter run time)
     EPISODES   = 10
     BATCH_SIZE = 64
     DISCOUNT   = 0.5
-    TN,TP,FP,FN= 1,10,-1,-10
+    TN, TP, FP, FN = 1, 10, -1, -10
     NUM_LP     = 200
     K_SLICES   = 3
 
