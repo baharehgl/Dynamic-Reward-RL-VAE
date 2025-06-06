@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-myasp_wadi_fixed2.py
-
-End-to-end WADI pipeline (VAE → penalty → RL with dynamic reward + AL + LP → 3-fold equal-slice validation),
-with the crucial fix of dropping any row that contains NaN so that no window fed into the VAE or LSTM ever contains NaN.
-"""
 
 import os
 import random
@@ -16,7 +9,7 @@ import tensorflow as tf
 # A) PRETRAIN VAE (EAGER MODE)
 # ───────────────────────────────────────────────────────────────────────────────
 from tensorflow.keras import layers, models, losses
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 # ─── Paths ─────────────────────────────────────────────────────────────────────
 BASE   = os.path.dirname(__file__)
@@ -99,8 +92,8 @@ windows = np.array([
 INPUT_DIM = windows.shape[1]
 print(f"[VAE] Flattened‐window INPUT_DIM = {INPUT_DIM}")
 
-# Standardize those sampled windows
-scaler = StandardScaler().fit(windows)
+# Use RobustScaler (instead of StandardScaler) to avoid overflow when later transforming outlier windows
+scaler = RobustScaler().fit(windows)
 Xs     = scaler.transform(windows)
 print(f"[VAE] Xs.shape = {Xs.shape}\n")
 
@@ -134,14 +127,14 @@ vae.summary()
 vae.fit(Xs, epochs=2, batch_size=32, verbose=1)
 print("[VAE] Pretraining complete\n")
 
-# ─── 5) Compute per‐step reconstruction error over entire TS (with clipping) ──
+# ─── 5) Compute per‐step reconstruction error over entire TS (with RobustScaler) ──
 print("[VAE] Computing per‐step reconstruction error…")
 all_windows = np.array([
     TS.iloc[i - N_STEPS + 1 : i + 1][feature_cols].values.flatten()
     for i in range(N_STEPS - 1, len(TS))
-], dtype="float32")  # → (len(TS) - (N_STEPS - 1), 25*n_features)
+], dtype="float32")  # → (len(TS)-(N_STEPS-1), 25*n_features)
 
-# Scale them, then clip to [−10, +10] to avoid overflow
+# Scale them with the SAME RobustScaler, then clip to [-10, +10]
 all_windows_scaled = scaler.transform(all_windows)
 all_windows_scaled = np.clip(all_windows_scaled, -10.0, 10.0)
 
@@ -207,7 +200,7 @@ class EnvWaDi:
         if not done:
             two_s = self.statefnc(self.timeseries, self.t)
         else:
-            # If done, return any dummy state
+            # If done, return last‐possible window
             two_s = self.statefnc(self.timeseries, self.N - 1)
         return two_s, r, done, {}
 
@@ -403,13 +396,13 @@ def train_and_validate(AL_budget):
 # C) Driver loop
 # ───────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Hyperparameters (you may lower EPISODES or BATCH_SIZE if it’s still too slow)
+    # Hyperparameters (you can lower EPISODES or BATCH_SIZE if it’s still slow)
     EPISODES   = 10      # RL episodes per AL‐budget
     BATCH_SIZE = 64      # minibatch size for replay
     DISCOUNT   = 0.5
     TN, TP, FP, FN = 1, 10, -1, -10
     NUM_LP     = 200     # number of pseudo‐labels each episode
-    K_SLICES   = 3       # equal‐slice cross-validation folds
+    K_SLICES   = 3       # 3‐fold equal‐slice cross‐validation
 
     for AL in [1000, 5000, 10000]:
         print(f"\n=== ACTIVE LEARNING BUDGET: {AL} ===")
