@@ -12,33 +12,25 @@ import matplotlib.pyplot as plt
 from scipy import stats
 
 import tensorflow as tf
-tf.compat.v1.disable_eager_execution()
-
 from tensorflow.keras import layers, models, losses
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
-from sklearn.semi_supervised import LabelPropagation, LabelSpreading
+from sklearn.semi_supervised import LabelSpreading
 
-# append cwd so we can import our env.py
+# Imports from env_KPI
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 from env_KPI import EnvKPI
 
-# Select your two CSVs here:
-train_csv = os.path.join(current_dir, "KPI_data", "train", "phase2_train.csv")
-test_csv  = os.path.join(current_dir, "KPI_data", "test",  "phase2_ground_truth.csv")
-
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
-# --------------- Hyperparams ----------------
-DATAFIXED                = 0
-EPISODES                 = 300
-DISCOUNT_FACTOR          = 0.5
-n_steps                  = 25
-n_input_dim              = 2
-n_hidden_dim             = 128
-validation_separate_ratio= 0.9
+# Hyperparameters
+EPISODES                  = 3
+n_steps                   = 25
+n_input_dim               = 2
+n_hidden_dim              = 128
+validation_separate_ratio = 0.9
 
 TN_Value = 1
 TP_Value = 5
@@ -333,8 +325,11 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     print("Avg F1 on KPI test set:", avg_f1)
     return avg_f1
 
-if __name__=="__main__":
-    # example runs:
+if __name__ == '__main__':
+    train_csv = os.path.join(current_dir, 'KPI_data','train','phase2_train.csv')
+    test_csv  = os.path.join(current_dir, 'KPI_data','test', 'phase2_ground_truth.csv')
+
+    # run experiments
     train_wrapper(200, 1000, 0.96)
     train_wrapper(200, 5000, 0.96)
     train_wrapper(200,10000,0.96)
