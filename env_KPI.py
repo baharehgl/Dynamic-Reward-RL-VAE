@@ -7,6 +7,7 @@ import sklearn.preprocessing
 
 # Constants\NOT_ANOMALY = 0
 ANOMALY     = 1
+NOT_ANOMALY = 0
 REWARD_CORRECT   = 1
 REWARD_INCORRECT = -1
 action_space = [NOT_ANOMALY, ANOMALY]
