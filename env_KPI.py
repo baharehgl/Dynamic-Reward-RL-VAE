@@ -1,5 +1,4 @@
 import os
-import random
 import numpy as np
 import pandas as pd
 import sklearn.preprocessing
@@ -45,12 +44,12 @@ class EnvKPI:
         if not self.timeseries_repo:
             raise ValueError(f"No KPI data in {train_csv}")
 
-        self.datasetsize      = len(self.timeseries_repo)
-        self.action_space_n   = len(action_space)
-        self.datasetidx       = 0
-        self.timeseries       = None
-        self.timeseries_states= None
-        self.timeseries_cursor= 0
+        self.datasetsize       = len(self.timeseries_repo)
+        self.action_space_n    = len(action_space)
+        self.datasetidx        = 0
+        self.timeseries        = None
+        self.timeseries_states = None
+        self.timeseries_cursor = 0
 
     def reset(self, to_idx=None):
         if to_idx is None:
@@ -78,7 +77,6 @@ class EnvKPI:
                 action
             )
 
-        # update stored state
         if (isinstance(next_state, np.ndarray)
            and next_state.ndim > np.ndim(self.timeseries_states)):
             self.timeseries_states = next_state[action]
