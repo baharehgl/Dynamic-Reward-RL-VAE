@@ -37,10 +37,7 @@ TP_Value = 5
 FP_Value = -1
 FN_Value = -5
 
-NOT_ANOMALY = 0
-ANOMALY     = 1
-action_space= [NOT_ANOMALY, ANOMALY]
-action_space_n = len(action_space)
+
 
 # --------------- VAE Setup ------------------
 def load_normal_data(data_path, n_steps):
