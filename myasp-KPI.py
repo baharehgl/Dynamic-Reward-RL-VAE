@@ -23,7 +23,7 @@ from sklearn.semi_supervised import LabelPropagation, LabelSpreading
 # append cwd so we can import our env.py
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
-from env_KPI import EnvKPI                  
+from env_KPI import EnvKPI
 
 # Select your two CSVs here:
 train_csv = os.path.join(current_dir, "KPI_data", "train", "phase2_train.csv")
@@ -290,7 +290,7 @@ def train_wrapper(num_LP, num_AL, discount_factor):
     data_directory = os.path.join(current_dir, "normal-data")
     X_train = load_normal_data(data_directory, n_steps)
     vae_model= build_vae(original_dim, latent_dim, intermediate_dim)
-    vae_model.fit(X_train, epochs=200, batch_size=32)
+    vae_model.fit(X_train, epochs=20, batch_size=32)
     vae_model.save('vae_model.h5')
 
     # 2) build KPI env
