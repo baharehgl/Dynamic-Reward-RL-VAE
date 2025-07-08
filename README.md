@@ -126,7 +126,7 @@ Dynamic-Reward-RL-VAE/
 │   ├── metrics.py      # Precision/Recall/F1 computations
 │   └── config.py       # Default hyperparameters
 │
-├── Dynamic Reward-icml2025.pdf  # Full paper (ICML 2025)
+├── Dynamic Reward.pdf  
 ├── requirements.txt
 ├── LICENSE
 └── README.md
