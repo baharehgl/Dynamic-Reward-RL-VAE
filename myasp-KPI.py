@@ -17,7 +17,7 @@ tf.compat.v1.disable_eager_execution()
 
 from tensorflow.keras import layers, models, losses
 
-# ensure env_KPI.py is importable
+# Ensure env_KPI.py is importable
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 from env_KPI import EnvKPI
@@ -72,12 +72,12 @@ def build_vae(original_dim, latent_dim=2, intermediate_dim=64):
 
     vae = models.Model(x, x_dec)
     recon = losses.mse(x, x_dec)*original_dim
-    kl    = -0.5 * tf.reduce_sum(1+z_log_var - tf.square(z_mean)-tf.exp(z_log_var), axis=-1)
+    kl    = -0.5 * tf.reduce_sum(1+z_log_var - tf.square(z_mean) - tf.exp(z_log_var), axis=-1)
     vae.add_loss(tf.reduce_mean(recon+kl))
     vae.compile(optimizer='adam')
     return vae
 
-# --- State & reward ---
+# --- State & Reward ---
 def RNNBinaryStateFuc(ts, cursor, prev=None, action=None):
     if cursor == n_steps:
         st = [[ts['value'].iat[i],0] for i in range(n_steps)]
@@ -90,19 +90,16 @@ def RNNBinaryStateFuc(ts, cursor, prev=None, action=None):
     return None
 
 def RNNBinaryRewardFuc(ts, cursor, action, vae_model, dynamic_coef=1.0):
-    if cursor < n_steps:
-        return [0,0]
-    cur = np.array([ts['value'].iloc[cursor-n_steps:cursor]])
+    cur   = np.array([ts['value'].iloc[cursor-n_steps:cursor]])
     recon = vae_model.predict(cur)
-    err = np.mean((recon-cur)**2)
-    pen = dynamic_coef*err
-    lbl = ts['label'].iat[cursor]
+    err   = np.mean((recon-cur)**2)
+    pen   = dynamic_coef*err
+    lbl   = ts['label'].iat[cursor]
     if lbl==0: return [TN_Value+pen, FP_Value+pen]
     if lbl==1: return [FN_Value+pen, TP_Value+pen]
     return [0,0]
 
 def RNNBinaryRewardFucTest(ts, cursor, action=0):
-    if cursor < n_steps: return [0,0]
     an = ts['anomaly'].iat[cursor]
     return [TN_Value, FP_Value] if an==0 else [FN_Value, TP_Value]
 
@@ -111,17 +108,19 @@ class Q_Estimator_Nonlinear:
     def __init__(self, lr=1e-3, scope="Q"):
         self.scope = scope
         with tf.compat.v1.variable_scope(scope):
-            self.state = tf.compat.v1.placeholder(tf.float32, [None,n_steps,n_input_dim], name="state")
-            self.target= tf.compat.v1.placeholder(tf.float32, [None,len(action_space)], name="target")
+            self.state  = tf.compat.v1.placeholder(tf.float32, [None,n_steps,n_input_dim], name="state")
+            self.target = tf.compat.v1.placeholder(tf.float32, [None,len(action_space)],    name="target")
             cell = tf.compat.v1.nn.rnn_cell.LSTMCell(n_hidden_dim)
-            outs, _ = tf.compat.v1.nn.dynamic_rnn(cell, self.state, dtype=tf.float32)
-            last = outs[:, -1, :]
+            outs,_ = tf.compat.v1.nn.dynamic_rnn(cell, self.state, dtype=tf.float32)
+            last   = outs[:,-1,:]
             self.qvals = layers.Dense(len(action_space))(last)
-            self.loss = tf.reduce_mean(tf.square(self.qvals-self.target))
+            self.loss  = tf.reduce_mean(tf.square(self.qvals-self.target))
             self.train = tf.compat.v1.train.AdamOptimizer(lr).minimize(self.loss)
+
     def predict(self, s, sess=None):
         sess = sess or tf.compat.v1.get_default_session()
         return sess.run(self.qvals, {self.state:s})
+
     def update(self, s, t, sess=None):
         sess = sess or tf.compat.v1.get_default_session()
         sess.run(self.train, {self.state:s, self.target:t})
@@ -138,125 +137,143 @@ def update_dynamic_coef_proportional(cur, rew, target=100.0, alpha=0.01, min_coe
     nc = cur + alpha*(target-rew)
     return max(min(nc, max_coef), min_coef)
 
-# --- Train with validation & early stopping ---
+# --- Active Learning ---
+class active_learning:
+    def __init__(self, env, N, estimator, already):
+        self.env = env; self.N=N; self.estimator=estimator; self.sel=set(already)
+    def get_samples(self):
+        d=[]
+        for st in self.env.states_list:
+            q = self.estimator.predict([st])[0]
+            d.append(abs(q[0]-q[1]))
+        order = np.argsort(d)
+        return [i for i in order if i not in self.sel][:self.N]
+
+# --- Train with Validation & Early Stopping ---
 def train_with_validation(train_csv, test_csv,
                           num_episodes=300,
                           num_epoches=10,
                           validate_every=10,
                           patience=3,
+                          num_LP=50,
+                          num_AL=10,
                           discount_factor=0.96):
-    # build full env
+
+    # FULL environ for train/val split
     env = EnvKPI(train_csv, test_csv)
     env.statefnc   = RNNBinaryStateFuc
-    env_full_size  = env.datasetsize
-    train_cut      = int(env_full_size * validation_separate_ratio)
-    train_indices  = list(range(train_cut))
-    val_indices    = list(range(train_cut, env_full_size))
+
+    # indices
+    total     = env.datasetsize
+    cut       = int(total*validation_separate_ratio)
+    train_idx = list(range(cut))
+    val_idx   = list(range(cut, total))
 
     # separate test env
     env_test = EnvKPI(train_csv, test_csv)
-    env_test.statefnc = RNNBinaryStateFuc
-    env_test.rewardfnc= RNNBinaryRewardFucTest
+    env_test.statefnc   = RNNBinaryStateFuc
+    env_test.rewardfnc  = RNNBinaryRewardFucTest
 
-    # pretrain VAE
-    x_train = load_normal_data(os.path.join(current_dir,"normal-data"), n_steps)
-    vae_model = build_vae(original_dim, latent_dim, intermediate_dim)
-    vae_model.fit(x_train, epochs=5, batch_size=32, verbose=0)
+    # Pretrain VAE
+    x_tr = load_normal_data(os.path.join(current_dir,"normal-data"), n_steps)
+    vae = build_vae(original_dim, latent_dim, intermediate_dim)
+    vae.fit(x_tr, epochs=5, batch_size=32, verbose=0)
 
-    # TF session & networks
+    # TF setup
     tf.compat.v1.reset_default_graph()
     sess = tf.compat.v1.Session()
     tf.compat.v1.keras.backend.set_session(sess)
-    q_net   = Q_Estimator_Nonlinear(scope="Q")
+    q_net   = Q_Estimator_Nonlinear(scope="q")
     tgt_net = Q_Estimator_Nonlinear(scope="target")
     sess.run(tf.compat.v1.global_variables_initializer())
 
     best_val_f1 = 0.0
-    no_improve  = 0
-    dynamic_coef= 10.0
-    history_r, history_c = [], []
+    no_imp      = 0
+    dyn_coef    = 10.0
+    hist_r, hist_c = [], []
 
     for ep in range(1, num_episodes+1):
-        # pick a random train KPI
-        idx = random.choice(train_indices)
-        state = env.reset(to_idx=idx)
-        env.rewardfnc = lambda ts,tc,a: RNNBinaryRewardFuc(ts,tc,a,vae_model,dynamic_coef)
+        # pick KPI
+        ki = random.choice(train_idx)
+        ts = env.reset(to_idx=ki)
+        env.rewardfnc = lambda ts_,c,a: RNNBinaryRewardFuc(ts_,c,a,vae,dyn_coef)
         env.states_list = env.get_states_list()
 
-        # run one episode
-        done = False
-        episode_reward = 0.0
+        # Active Learning
+        already = [i-n_steps for i in range(n_steps, len(env.timeseries['label']))
+                   if env.timeseries['label'].iat[i]!=-1]
+        al = active_learning(env, num_AL, q_net, already)
+        samples = al.get_samples()
+        for s in samples:
+            pos = s+n_steps
+            env.timeseries['label'].iat[pos] = env.timeseries['anomaly'].iat[pos]
+
+        # Build training memory by iterating the RNN states:
         memory = []
-        while not done:
+        for t, state in enumerate(env.states_list):
             probs = make_epsilon_greedy_policy(q_net, env.action_space_n, sess)(state, max(0.1,1-ep/num_episodes))
             a = np.random.choice(len(probs), p=probs)
-            nxt, r, done, _ = env.step(a)
-            episode_reward += r[a]
-            memory.append((state, r, nxt, done))
-            state = nxt[a]
+            r = env.rewardfnc(env.timeseries, t+n_steps, a)
+            memory.append((state, r, state, False))
 
-        # train on that memory
+        # Train on memory
         for _ in range(num_epoches):
             batch = random.sample(memory, min(len(memory),64))
-            states, rewards, next_states, dones = map(np.array, zip(*batch))
-            q_next = tgt_net.predict(next_states, sess)
-            max_n  = np.max(q_next, axis=1)
-            targets= rewards + discount_factor * max_n[:,None]
-            q_net.update(states, targets, sess)
-        # update target network occasionally
+            S, R, NS, D = map(np.array, zip(*batch))
+            qn = tgt_net.predict(NS, sess)
+            mqn = np.max(qn, axis=1)
+            targets = R + discount_factor*mqn[:,None]
+            q_net.update(S, targets, sess)
+
+        # Sync target net
         if ep % 5 == 0:
-            vars_q = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "Q")
-            vars_t = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "target")
-            for vq, vt in zip(vars_q, vars_t):
-                sess.run(vt.assign(vq))
+            vq = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "q")
+            vt = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, "target")
+            for x,y in zip(vq,vt):
+                sess.run(y.assign(x))
 
-        history_r.append(episode_reward)
-        dynamic_coef = update_dynamic_coef_proportional(dynamic_coef, episode_reward,
-                                                        target=0.0, alpha=0.001)
-        history_c.append(dynamic_coef)
+        # Logging & dynamic coef
+        hist_r.append(sum(r[a] for (s,r,ns,d) in memory for a in [np.argmax(make_epsilon_greedy_policy(q_net,env.action_space_n,sess)(s,0))]))
+        dyn_coef = update_dynamic_coef_proportional(dyn_coef, hist_r[-1], target=0.0, alpha=0.001)
+        hist_c.append(dyn_coef)
 
-        # validation check
+        # Validation
         if ep % validate_every == 0:
-            f1s = []
-            for vid in val_indices:
-                st = env.reset(to_idx=vid)
-                env.rewardfnc = RNNBinaryRewardFucTest
-                done = False
+            f1s=[]
+            for v in val_idx:
+                st = env_test.reset(to_idx=v)
                 preds, truths = [], []
-                while not done:
-                    a = np.argmax(make_epsilon_greedy_policy(q_net, env.action_space_n, sess)(st,0))
+                for t, state in enumerate(env_test.get_states_list()):
+                    a = np.argmax(make_epsilon_greedy_policy(q_net, env_test.action_space_n, sess)(state,0))
                     preds.append(a)
-                    truths.append(env.timeseries['anomaly'].iat[env.timeseries_cursor])
-                    nxt, _, done, _ = env.step(a)
-                    st = nxt[a]
-                _,_,f1,_ = precision_recall_fscore_support(truths, preds,
-                                    average='binary', zero_division=0)
-                f1s.append(f1)
+                    truths.append(env_test.timeseries['anomaly'].iat[t+n_steps])
+                _,_,f,_ = precision_recall_fscore_support(truths, preds, average='binary', zero_division=0)
+                f1s.append(f)
             val_f1 = np.mean(f1s)
-            print(f"[Validation] ep {ep}, F1={val_f1:.4f}")
-
+            print(f"[Val] Ep {ep}, F1={val_f1:.4f}")
             if val_f1 > best_val_f1:
-                best_val_f1 = val_f1
-                no_improve = 0
+                best_val_f1 = val_f1; no_imp = 0
             else:
-                no_improve += 1
-                if no_improve >= patience:
-                    print(f"Early stopping at ep {ep}")
+                no_imp +=1
+                if no_imp >= patience:
+                    print(f"Early stop @ ep {ep}")
                     break
 
-    # save plots
+    # Save plots
     os.makedirs(os.path.join(current_dir,"exp"), exist_ok=True)
-    plt.figure(); plt.plot(history_r); plt.title("Reward"); plt.savefig("exp/reward.png"); plt.close()
-    plt.figure(); plt.plot(history_c); plt.title("Coef");   plt.savefig("exp/coef.png");   plt.close()
+    plt.figure(); plt.plot(hist_r); plt.title("Reward"); plt.savefig("exp/reward.png"); plt.close()
+    plt.figure(); plt.plot(hist_c); plt.title("Coef");   plt.savefig("exp/coef.png");   plt.close()
 
-    print("Best validation F1:", best_val_f1)
-    return history_r, history_c, best_val_f1
+    print("Best Val F1:", best_val_f1)
+    return hist_r, hist_c, best_val_f1
 
 if __name__ == "__main__":
     train_csv = os.path.join(current_dir,"KPI_data","train","phase2_train.csv")
     test_csv  = os.path.join(current_dir,"KPI_data","test", "phase2_ground_truth.csv")
     train_with_validation(train_csv, test_csv,
-                          num_episodes=100,
-                          num_epoches=5,
-                          validate_every=10,
-                          patience=2)
+        num_episodes=100,
+        num_epoches=5,
+        validate_every=10,
+        patience=3,
+        num_LP=50,
+        num_AL=10)
