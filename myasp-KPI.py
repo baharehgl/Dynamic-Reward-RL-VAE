@@ -30,7 +30,7 @@ from env_KPI import EnvKPI
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 
 # ----- Hyperparameters -----
-EPISODES                  = 300
+EPISODES                  = 3
 n_steps                   = 25
 n_input_dim               = 2
 n_hidden_dim              = 128
