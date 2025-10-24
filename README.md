@@ -107,10 +107,10 @@ python scripts/visualize_results.py \
 ```bash
 Dynamic-Reward-RL-VAE/
 ├── data/
-│   ├── yahoo_a1/       # Place A1 CSVs here
-│   ├── yahoo_a2/       # Place A2 CSVs here
-│   ├── smd/            # Place SMD CSVs here
-│   └── wadi/           # Place WaDi CSVs here
+│   ├── yahoo_a1/       
+│   ├── yahoo_a2/       
+│   ├── smd/            
+│   └── wadi/           
 │
 ├── models/
 │   ├── vae/            # VAE definitions & weights
