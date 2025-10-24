@@ -142,9 +142,7 @@ Dynamic-Reward-RL-VAE/
   author    = {Golchin, Bahareh and Rekabdar, Banafsheh and Liu, Kunpeng},
   booktitle = {Proceedings of the IEEE AIxSET 2025},
   year      = {2025},
-  publisher = {IEEE},
-  note      = {Accepted},
-  url       = {https://github.com/baharehgl/Dynamic-Reward-RL-VAE}
+  publisher = {IEEE}  
 }
 ```
 <!--
