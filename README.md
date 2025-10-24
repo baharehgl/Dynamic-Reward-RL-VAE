@@ -1,4 +1,7 @@
 # Dynamic Reward Scaling for Reinforcement Learning in Time Series Anomaly Detection
+## Paper
+[Link to Paper](https://arxiv.org/pdf/2508.18474)  
+_Bahareh Golchin, Banafsheh Rekabdar, Kunpeng Liu_
 
 <div align="center">
   <img
@@ -130,6 +133,19 @@ Dynamic-Reward-RL-VAE/
 ├── requirements.txt
 ├── LICENSE
 └── README.md
+```
+
+## Citation
+```
+@inproceedings{golchin2025dynamic,
+  title     = {Dynamic Reward Scaling for Reinforcement Learning in Time Series Anomaly Detection},
+  author    = {Golchin, Bahareh and Rekabdar, Banafsheh and Liu, Kunpeng},
+  booktitle = {Proceedings of the IEEE AIxSET 2025},
+  year      = {2025},
+  publisher = {IEEE},
+  note      = {Accepted},
+  url       = {https://github.com/baharehgl/Dynamic-Reward-RL-VAE}
+}
 ```
 <!--
 ## Paper
